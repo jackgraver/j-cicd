@@ -21,7 +21,7 @@ func buildImage(projectDir string, img *ImageConfig) error {
 	}
 	args = append(args, context)
 
-	log.Printf("docker %s", strings.Join(args, " "))
+	log.Printf("[%s] docker %s", img.Label(), strings.Join(args, " "))
 	cmd := exec.Command("docker", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -32,7 +32,7 @@ func buildImage(projectDir string, img *ImageConfig) error {
 func pushImage(img *ImageConfig) error {
 	for _, tag := range img.Tags {
 		ref := fmt.Sprintf("%s:%s", img.Repository, tag)
-		log.Printf("docker push %s", ref)
+		log.Printf("[%s] docker push %s", img.Label(), ref)
 		cmd := exec.Command("docker", "push", ref)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

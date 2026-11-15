@@ -19,10 +19,13 @@ that a target VPS can then pull from to deploy.
 ## Status
 
 Basic CI/CD runner works end to end: `j-cicd run` loads a project's
-`.cicd.yaml`, runs its shell steps in order, and if an `image` block is
-configured, builds (and optionally pushes) a Docker image for it via the
-`docker` CLI. Not yet implemented: the VPS-side deploy helper, and the
-stretch-goal failure-investigation agent.
+`.cicd.yaml`, runs its shell steps in order, and builds (and optionally
+pushes) a Docker image per entry in `images:` via the `docker` CLI. A
+project can have multiple `images:` entries (e.g. separate frontend/backend
+services, each with their own Dockerfile) — `j-cicd init` auto-detects these
+by scanning for Dockerfiles rather than assuming a single one at the repo
+root. Not yet implemented: the VPS-side deploy helper, and the stretch-goal
+failure-investigation agent.
 
 j-cicd is project-agnostic by design: it takes a project directory and that
 project's own `.cicd.yaml` as input. `simpletrack` is just the first project
@@ -39,16 +42,34 @@ steps:                 # optional list of shell commands, run in order
   - name: test
     run: go test ./...
     dir: subdir         # optional, relative to the project dir
-image:                  # optional — omit if you don't want a docker stage
-  repository: registry.example.com/my-project
-  dockerfile: Dockerfile   # default: Dockerfile
-  context: .               # default: .
-  tags: [latest]           # default: [latest]
+images:                 # optional list — omit if there's no docker stage
+  - name: backend        # optional, just a label for logs
+    repository: ghcr.io/owner/my-project-backend
+    dockerfile: backend/Dockerfile   # default: Dockerfile
+    context: backend                 # default: .
+    tags: [latest]                   # default: [latest]
+  - name: frontend
+    repository: ghcr.io/owner/my-project-frontend
+    dockerfile: frontend/Dockerfile
+    context: frontend
 ```
+
+Each entry in `images:` is built and (optionally) pushed independently, so
+multi-service projects just list one entry per service/Dockerfile.
 
 Registry auth is whatever `docker login` already has configured on the
 host — j-cicd just shells out to `docker build`/`docker push`, it doesn't
-manage credentials itself.
+manage credentials itself. ghcr.io (GitHub Container Registry) works fine
+this way; see the project owner's own notes for the one-time
+`docker login ghcr.io` setup.
+
+`j-cicd init` scans the project directory for Dockerfiles (skipping
+`node_modules`/`vendor`/`dist`/`build`/dotfiles, up to 4 levels deep) and
+generates one `images:` entry per Dockerfile found, named after its parent
+directory. If the project's git `origin` remote points at GitHub, the
+generated `repository:` defaults to `ghcr.io/<owner>/<project>-<service>`;
+otherwise it falls back to a `registry.example.com/...` placeholder that
+needs editing by hand.
 
 ## Nix
 
@@ -78,8 +99,10 @@ into `vendorHash`.
 - `commands.go` — CLI flag parsing per subcommand (`run`, `init`, `version`).
 - `config.go` — `.cicd.yaml` schema and loading/validation.
 - `pipeline.go` — runs a project's steps in order, stops on first failure.
-- `docker.go` — shells out to `docker build`/`docker push`.
-- `init.go` — writes the starter config template.
+- `docker.go` — shells out to `docker build`/`docker push`, once per image.
+- `detect.go` — project inspection used by `init` (Dockerfile scan, GitHub
+  remote detection, go.mod/package.json detection).
+- `init.go` — assembles and writes a starter config using `detect.go`.
 - As more lands (VPS agent, failure-investigation agent), give it its own
   file or package rather than growing an existing one indefinitely.
 

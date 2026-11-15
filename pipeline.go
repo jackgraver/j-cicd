@@ -32,16 +32,17 @@ func RunPipeline(projectDir string, cfg *Config, opts RunOptions) error {
 		}
 	}
 
-	if cfg.Image != nil {
-		if err := buildImage(projectDir, cfg.Image); err != nil {
-			return fmt.Errorf("docker build failed: %w", err)
+	for i := range cfg.Images {
+		img := &cfg.Images[i]
+		if err := buildImage(projectDir, img); err != nil {
+			return fmt.Errorf("docker build (%s) failed: %w", img.Label(), err)
 		}
 		if opts.Push {
-			if err := pushImage(cfg.Image); err != nil {
-				return fmt.Errorf("docker push failed: %w", err)
+			if err := pushImage(img); err != nil {
+				return fmt.Errorf("docker push (%s) failed: %w", img.Label(), err)
 			}
 		} else {
-			log.Println("skipping push (--no-push)")
+			log.Printf("skipping push for %s (--no-push)", img.Label())
 		}
 	}
 

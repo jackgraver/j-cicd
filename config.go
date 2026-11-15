@@ -15,9 +15,9 @@ const defaultConfigFile = ".cicd.yaml"
 // wants to use j-cicd provides its own one of these — nothing here is
 // specific to any particular project.
 type Config struct {
-	Name  string       `yaml:"name"`
-	Steps []Step       `yaml:"steps"`
-	Image *ImageConfig `yaml:"image,omitempty"`
+	Name   string        `yaml:"name"`
+	Steps  []Step        `yaml:"steps"`
+	Images []ImageConfig `yaml:"images,omitempty"`
 }
 
 // Step is a single shell command run as part of the pipeline (build, test,
@@ -29,15 +29,27 @@ type Step struct {
 	Dir  string `yaml:"dir,omitempty"`
 }
 
-// ImageConfig describes how to package the project as a container image and
-// where to push it. Building/pushing is delegated to the docker CLI, so
-// registry auth is whatever `docker login` already has configured on the
-// host — j-cicd doesn't handle credentials itself.
+// ImageConfig describes how to package one service as a container image and
+// where to push it. A project can have several of these (e.g. a separate
+// frontend/backend each with their own Dockerfile). Building/pushing is
+// delegated to the docker CLI, so registry auth is whatever `docker login`
+// already has configured on the host — j-cicd doesn't handle credentials
+// itself.
 type ImageConfig struct {
+	Name       string   `yaml:"name,omitempty"`
 	Repository string   `yaml:"repository"`
 	Dockerfile string   `yaml:"dockerfile,omitempty"`
 	Context    string   `yaml:"context,omitempty"`
 	Tags       []string `yaml:"tags,omitempty"`
+}
+
+// Label returns a human-readable name for logging: the configured name,
+// or the repository if none was given.
+func (img *ImageConfig) Label() string {
+	if img.Name != "" {
+		return img.Name
+	}
+	return img.Repository
 }
 
 // LoadConfig reads and validates a pipeline config from path.
@@ -55,22 +67,23 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
-	if len(cfg.Steps) == 0 && cfg.Image == nil {
-		return nil, fmt.Errorf("%s: must define at least one step or an image block", path)
+	if len(cfg.Steps) == 0 && len(cfg.Images) == 0 {
+		return nil, fmt.Errorf("%s: must define at least one step or image", path)
 	}
 
-	if cfg.Image != nil {
-		if cfg.Image.Repository == "" {
-			return nil, fmt.Errorf("%s: image.repository is required", path)
+	for i := range cfg.Images {
+		img := &cfg.Images[i]
+		if img.Repository == "" {
+			return nil, fmt.Errorf("%s: images[%d].repository is required", path, i)
 		}
-		if cfg.Image.Dockerfile == "" {
-			cfg.Image.Dockerfile = "Dockerfile"
+		if img.Dockerfile == "" {
+			img.Dockerfile = "Dockerfile"
 		}
-		if cfg.Image.Context == "" {
-			cfg.Image.Context = "."
+		if img.Context == "" {
+			img.Context = "."
 		}
-		if len(cfg.Image.Tags) == 0 {
-			cfg.Image.Tags = []string{"latest"}
+		if len(img.Tags) == 0 {
+			img.Tags = []string{"latest"}
 		}
 	}
 
