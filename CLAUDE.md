@@ -26,6 +26,13 @@ services, each with their own Dockerfile) — `j-cicd init` auto-detects these
 by scanning for Dockerfiles rather than assuming a single one at the repo
 root. Every command runs under a cancellable context with a timeout, and
 images are tagged with the commit they were built from as well as `latest`.
+
+j-cicd is also a central manager for every project it builds: projects are
+registered once (`j-cicd add`) and then run by name from anywhere, every
+run is recorded with its outcome and full output, and bare `j-cicd` opens
+an interactive dashboard to pick a project, start or cancel a run, and
+browse history and logs (live while a run is going).
+
 Not yet implemented: the VPS-side deploy helper, and the stretch-goal
 failure-investigation agent.
 
@@ -129,14 +136,52 @@ into `vendorHash`.
 
 ## CLI
 
+- `j-cicd` — at a terminal, opens the dashboard (same as `j-cicd ui`);
+  otherwise prints usage.
+- `j-cicd add [project-dir] [--name n] [--config path]` — register a
+  project. The config must load; the name defaults to the config's `name:`.
+- `j-cicd remove <name>` — unregister (history and files are kept).
+- `j-cicd list` — projects with their latest result.
+- `j-cicd run [name|project-dir] [--config path] [--no-push] [--quiet]` —
+  run a pipeline. A bare word that names a registered project runs it;
+  anything path-like is a directory as before. A registered directory is
+  recorded under its registered name. `--quiet` only records output.
+- `j-cicd history [name] [-n count]` — recorded runs, newest first.
+- `j-cicd logs <run-id|name> [-f]` — a run's output (a name means its
+  latest run); `-f` follows it until it finishes.
+- `j-cicd cancel <run-id|name>` — stop a run in progress.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
   `.cicd.yaml`.
-- `j-cicd run [project-dir] [--config path] [--no-push]` — run the pipeline.
 - `j-cicd version`
 
-Flags work on either side of the project dir. Unknown flags and stray
+Flags work on either side of positional arguments. Unknown flags and stray
 positional arguments are errors rather than being ignored. Exit codes: 0 ok,
 1 pipeline failed, 2 usage error, 3 config could not be loaded.
+
+## State and history
+
+Everything lives under one root: `$J_CICD_HOME`, else
+`$XDG_STATE_HOME/j-cicd`, else `~/.local/state/j-cicd`.
+
+- `projects.json` — the registry (name, absolute dir, optional config).
+- `runs/<id>/run.json` + `runs/<id>/output.log` — one dir per run. IDs are
+  `YYYYMMDD-HHMMSS-<hex>` (UTC), so they sort by start time. The newest 50
+  finished runs per project are kept; older ones are pruned.
+- `locks/<project>.lock` — `flock`ed for the whole run, so only one run per
+  project executes at a time, across every j-cicd process. The kernel
+  releases it however the process dies.
+- `launcher.log` — stderr of background runs started from the dashboard.
+
+A run records the PID of the process executing it. A `running` record whose
+process is gone (SIGKILL, crash, reboot) is rewritten as `interrupted` the
+next time it's read. Cancelling is a SIGTERM to that PID, which j-cicd
+handles by killing the step's process group and recording `cancelled`.
+
+The dashboard never runs pipelines in-process: starting a run launches a
+detached `j-cicd run --quiet <name>` (own session), and the dashboard just
+re-reads the store every ~700ms. So quitting it leaves builds running, and
+CLI-started runs show up in it too. Push runs ask for confirmation; `b`
+builds without pushing.
 
 ## Code structure
 
@@ -161,6 +206,20 @@ positional arguments are errors rather than being ignored. Exit codes: 0 ok,
 - `internal/detect/` — project inspection: Dockerfile scan, GitHub remote
   and git revision detection (`detect.go`), and the `init` scaffolding built
   on top of it (`starter.go`).
+- `internal/store/` — persistent state: project registry (`projects.go`),
+  run records and pruning (`runs.go`), per-project locks (`lock.go`).
+  Plain JSON written atomically (temp file + rename).
+- `internal/manager/` — executes a project as a recorded run: lock, record
+  start, send all output to the run log (optionally echoed), record the
+  outcome. Also `Launch` (detached background run) and `Cancel`.
+  Every pipeline run, CLI or dashboard, goes through `manager.Run`.
+- `internal/display/` — shared formatting of runs (status symbols, ages,
+  durations) for the CLI tables and the dashboard.
+- `internal/tui/` — the Bubble Tea dashboard (`tui.go`) and its log viewer
+  (`logview.go`). It reads the store and launches runs through a callback;
+  it never calls the pipeline directly.
+- `cmd/j-cicd/manage.go` — the registry/history subcommands (`add`,
+  `remove`, `list`, `history`, `logs`, `cancel`, `ui`).
 - As more lands (VPS agent, failure-investigation agent), give it its own
   file or package rather than growing an existing one indefinitely.
 
@@ -179,7 +238,12 @@ positional arguments are errors rather than being ignored. Exit codes: 0 ok,
   `serviceName`, the Dockerfile scan over a `t.TempDir()`) are tested
   directly; the runner is tested with a fake `CommandRunner` that records
   the commands it was asked to run. `go test ./...` needs no docker daemon.
+  Anything touching state uses a `store.Open(t.TempDir())`; `cmd/j-cicd`
+  tests set `J_CICD_HOME` in `TestMain`, so tests never touch the real
+  registry. The dashboard is tested by driving the model's key handling
+  and checking `View()`.
 - Prefer the standard library where practical; only reach for a dependency
-  when it clearly earns its keep (e.g. a registry client, YAML parsing).
+  when it clearly earns its keep (e.g. a registry client, YAML parsing,
+  Bubble Tea/Lip Gloss for the dashboard).
 - No half-finished features behind TODOs — land things when they work end
   to end, even if narrow in scope.

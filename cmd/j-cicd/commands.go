@@ -5,16 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
-	"j-cicd/internal/pipeline"
+	"j-cicd/internal/display"
+	"j-cicd/internal/manager"
+	"j-cicd/internal/store"
 )
 
 // version is injected at build time (-ldflags "-X main.version=...") so
@@ -23,13 +25,26 @@ import (
 var version = "dev"
 
 func printUsage() {
-	fmt.Fprint(os.Stderr, `j-cicd - run a project's CI/CD pipeline from a config file it provides
+	fmt.Fprint(os.Stderr, `j-cicd - build, test and ship your projects from one place
 
 Usage:
-  j-cicd run [project-dir]     run the pipeline (build/test steps, then docker build+push)
+  j-cicd                       open the dashboard (when run in a terminal)
+  j-cicd ui                    open the dashboard
+
+  j-cicd add [project-dir]     register a project so it can be run by name
+  j-cicd remove <name>         unregister a project (its history is kept)
+  j-cicd list                  list projects and their latest result
+
+  j-cicd run [name|dir]        run a pipeline (steps, then docker build+push)
+  j-cicd history [name]        list recorded runs, newest first
+  j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
+  j-cicd cancel <run-id|name>  stop a run in progress
+
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
   j-cicd version               print the j-cicd version
 
+Every run is recorded under the state dir (`+"$"+store.HomeEnv+`, else
+$XDG_STATE_HOME/j-cicd, else ~/.local/state/j-cicd).
 Run "j-cicd <command> -h" for flags on a given command.
 `)
 }
@@ -37,41 +52,12 @@ Run "j-cicd <command> -h" for flags on a given command.
 // parseCommandFlags parses args for a subcommand that takes an optional
 // project dir plus flags, in any order. It returns the project dir ("" if
 // none was given), and rejects anything left over rather than ignoring it.
-//
-// Go's flag package stops parsing at the first non-flag argument, so a
-// single Parse of the raw argv would leave every flag after the project
-// dir unconsumed and silently discarded — `j-cicd run . --no-push` would
-// push. Parsing repeatedly, peeling off one positional each time it
-// stops, makes flags work on either side of the project dir.
 func parseCommandFlags(fs *flag.FlagSet, args []string) (string, error) {
-	fs.SetOutput(io.Discard)
-
-	var positional []string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				fmt.Fprintf(os.Stderr, "Usage: j-cicd %s [project-dir] [flags]\n\nFlags:\n", fs.Name())
-				fs.SetOutput(os.Stderr)
-				fs.PrintDefaults()
-				return "", flag.ErrHelp
-			}
-			return "", fmt.Errorf("%w (run \"j-cicd %s -h\" for usage)", err, fs.Name())
-		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positional, rest = append(positional, rest[0]), rest[1:]
+	positional, err := parseFlagsOnly(fs, args, "[project-dir] [flags]", 0, 1)
+	if err != nil || len(positional) == 0 {
+		return "", err
 	}
-
-	if len(positional) > 1 {
-		return "", fmt.Errorf("unexpected argument %q (run \"j-cicd %s -h\" for usage)", positional[1], fs.Name())
-	}
-	if len(positional) == 1 {
-		return positional[0], nil
-	}
-	return "", nil
+	return positional[0], nil
 }
 
 // runArgs is the resolved invocation for `j-cicd run`.
@@ -79,19 +65,21 @@ type runArgs struct {
 	projectDir string
 	configPath string
 	push       bool
+	quiet      bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
 	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it")
+	quiet := fs.Bool("quiet", false, "don't echo the run's output (it's still recorded; see j-cicd logs)")
 
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush}
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet}
 	if parsed.projectDir == "" {
 		// A --config with no project dir means "run that project": its
 		// steps, step dirs, dockerfiles and build contexts all resolve
@@ -118,28 +106,112 @@ func cmdRun(args []string) error {
 		return usageError(err)
 	}
 
-	// The revision tags each image with the commit it was built from, so
-	// a deploy has something immutable to pin even though "latest" moves.
-	revision, ok := detect.GitRevision(parsed.projectDir)
-	if !ok {
-		log.Printf("no git revision for %s — images will only be tagged \"latest\"", parsed.projectDir)
-	}
-
-	cfg, err := config.Load(parsed.configPath, revision)
+	st, err := openStore()
 	if err != nil {
-		return &exitError{code: exitConfig, err: fmt.Errorf("load config: %w", err)}
+		return err
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return err
 	}
 
 	// Ctrl-C / SIGTERM cancels the run: in-flight steps are killed rather
-	// than left running after j-cicd is gone.
+	// than left running after j-cicd is gone, and the run is recorded as
+	// cancelled. SIGTERM is also how the dashboard cancels a run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := pipeline.New(parsed.projectDir, pipeline.Options{Push: parsed.push})
-	if err := p.Run(ctx, cfg); err != nil {
+	opts := manager.Options{Push: parsed.push}
+	if !parsed.quiet {
+		opts.Echo = os.Stderr
+	}
+	run, err := manager.Run(ctx, st, target, opts)
+	if run.ID != "" && run.Status.Done() {
+		log.Printf("run %s %s after %s (output: j-cicd logs %s)", run.ID, run.Status, display.Duration(run.Duration()), run.ID)
+	}
+	if err != nil {
+		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
+			return &exitError{code: exitConfig, err: err}
+		}
+		if errors.Is(err, manager.ErrBusy) {
+			return err
+		}
 		return fmt.Errorf("pipeline failed: %w", err)
 	}
 	return nil
+}
+
+// resolveRunTarget decides what `j-cicd run <x>` means. A bare word that
+// names a registered project runs that project; anything that looks like a
+// path (or names no project) is a project directory, as before. A
+// directory that is itself registered is recorded under its registered
+// name, so `cd proj && j-cicd run` and `j-cicd run proj` share a history.
+func resolveRunTarget(st *store.Store, parsed runArgs) (manager.Target, error) {
+	arg := parsed.projectDir
+	explicitConfig := parsed.configPath != filepath.Join(parsed.projectDir, config.DefaultFile)
+
+	if looksLikeName(arg) {
+		p, err := st.Project(arg)
+		switch {
+		case err == nil && explicitConfig:
+			return manager.Target{}, usageError(fmt.Errorf("--config can't be used with a registered project (%q); it already has one", arg))
+		case err == nil:
+			return manager.TargetFor(p), nil
+		case !errors.Is(err, store.ErrNotFound):
+			return manager.Target{}, err
+		}
+		if _, statErr := os.Stat(arg); statErr != nil {
+			return manager.Target{}, &exitError{code: exitConfig, err: fmt.Errorf("no registered project or directory named %q (see j-cicd list)", arg)}
+		}
+	}
+
+	// A directory that isn't a pipeline at all is a typo, not a run worth
+	// recording in history.
+	if _, err := os.Stat(parsed.configPath); err != nil {
+		return manager.Target{}, &exitError{code: exitConfig, err: fmt.Errorf("load config: %w", err)}
+	}
+	if !explicitConfig {
+		if p, ok, err := st.ProjectByDir(arg); err != nil {
+			return manager.Target{}, err
+		} else if ok {
+			return manager.TargetFor(p), nil
+		}
+	}
+	abs, err := filepath.Abs(arg)
+	if err != nil {
+		return manager.Target{}, err
+	}
+	return manager.Target{Name: nameFromDir(abs), Dir: arg, ConfigPath: parsed.configPath}, nil
+}
+
+// looksLikeName reports whether a run argument could be a project name
+// rather than a path.
+func looksLikeName(arg string) bool {
+	return arg != "" && !strings.ContainsAny(arg, `/\`) && store.ValidName(arg) == nil
+}
+
+// nameFromDir derives a project name from a directory, for runs of
+// unregistered directories and as the default for `j-cicd add`.
+func nameFromDir(dir string) string {
+	name := strings.Map(func(r rune) rune {
+		if r == '.' || r == '_' || r == '-' || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
+			return r
+		}
+		return '-'
+	}, filepath.Base(dir))
+	name = strings.TrimLeft(name, ".-")
+	if name == "" {
+		return "project"
+	}
+	return name
+}
+
+func openStore() (*store.Store, error) {
+	root, err := store.DefaultRoot()
+	if err != nil {
+		return nil, err
+	}
+	return store.Open(root)
 }
 
 // initArgs is the resolved invocation for `j-cicd init`.

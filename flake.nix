@@ -22,7 +22,7 @@
             pname = "j-cicd";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-g+yaVIx4jxpAQ/+WrGKxhVeliYx7nLQe/zsGpxV4Fn4=";
+            vendorHash = "sha256-cpZVWNgH/SoTu117Iby4QExgP0ROPzWju6A0iUkyQ1o=";
 
             subPackages = [ "cmd/j-cicd" ];
             ldflags = [ "-X main.version=${version}" ];
