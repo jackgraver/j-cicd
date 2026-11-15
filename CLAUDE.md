@@ -24,7 +24,9 @@ pushes) a Docker image per entry in `images:` via the `docker` CLI. A
 project can have multiple `images:` entries (e.g. separate frontend/backend
 services, each with their own Dockerfile) — `j-cicd init` auto-detects these
 by scanning for Dockerfiles rather than assuming a single one at the repo
-root. Not yet implemented: the VPS-side deploy helper, and the stretch-goal
+root. Every command runs under a cancellable context with a timeout, and
+images are tagged with the commit they were built from as well as `latest`.
+Not yet implemented: the VPS-side deploy helper, and the stretch-goal
 failure-investigation agent.
 
 j-cicd is project-agnostic by design: it takes a project directory and that
@@ -36,18 +38,20 @@ it against a second or third project just means writing another config.
 
 ```yaml
 name: my-project       # required
+timeout: 30m            # optional, default time limit per step/docker command
 steps:                 # optional list of shell commands, run in order
   - name: build
     run: go build ./...
   - name: test
     run: go test ./...
     dir: subdir         # optional, relative to the project dir
+    timeout: 10m        # optional, overrides the top-level timeout
 images:                 # optional list — omit if there's no docker stage
   - name: backend        # optional, just a label for logs
     repository: ghcr.io/owner/my-project-backend
     dockerfile: backend/Dockerfile   # default: Dockerfile
     context: backend                 # default: .
-    tags: [latest]                   # default: [latest]
+    tags: [latest]                   # default: [latest, <git revision>]
   - name: frontend
     repository: ghcr.io/owner/my-project-frontend
     dockerfile: frontend/Dockerfile
@@ -57,6 +61,30 @@ images:                 # optional list — omit if there's no docker stage
 Each entry in `images:` is built and (optionally) pushed independently, so
 multi-service projects just list one entry per service/Dockerfile.
 
+The config is validated strictly, because it decides what gets published to
+a registry:
+
+- **Unknown keys are an error.** A typo like `dockerFile:` or `tag:` would
+  otherwise be dropped silently and the build would quietly use defaults.
+- **A step must have a `run:`.** An empty one would run as `sh -c ""` and
+  exit 0, which makes "no test ran" look like "tests passed".
+- **Two images may not push the same `repository:tag`.** Otherwise both get
+  built, both get pushed, the registry keeps only the last, and a VPS
+  pulling that tag gets whichever happened to sort last.
+
+**Tags.** When an image declares no `tags:`, it gets `latest` plus the short
+git revision of the project dir (e.g. `[latest, 7fc0b4b12345]`), so every
+build leaves behind an immutable handle to roll back to or to map a running
+container to a commit. A tree with uncommitted changes is tagged
+`<rev>-dirty`, since j-cicd builds what's on disk rather than what's
+committed. Declaring `tags:` explicitly overrides all of this.
+
+**Timeouts.** Each step and each docker command runs under a deadline:
+`timeout:` on the step, else `timeout:` at the top level, else the runner's
+built-in default (`pipeline.DefaultTimeout`, 60m). `timeout: 0` means no
+limit. Steps run in their own process group, so a timeout (or Ctrl-C) kills
+the whole step, not just the `sh -c` wrapper around it.
+
 Registry auth is whatever `docker login` already has configured on the
 host — j-cicd just shells out to `docker build`/`docker push`, it doesn't
 manage credentials itself. ghcr.io (GitHub Container Registry) works fine
@@ -64,12 +92,17 @@ this way; see the project owner's own notes for the one-time
 `docker login ghcr.io` setup.
 
 `j-cicd init` scans the project directory for Dockerfiles (skipping
-`node_modules`/`vendor`/`dist`/`build`/dotfiles, up to 4 levels deep) and
-generates one `images:` entry per Dockerfile found, named after its parent
-directory. If the project's git `origin` remote points at GitHub, the
-generated `repository:` defaults to `ghcr.io/<owner>/<project>-<service>`;
-otherwise it falls back to a `registry.example.com/...` placeholder that
-needs editing by hand.
+`node_modules`/`vendor`/`dist`/`build`/dotfiles, up to 4 levels deep, and
+ignoring non-buildable `Dockerfile.*` files like `Dockerfile.md` or editor
+backups) and generates one `images:` entry per Dockerfile found. The service
+label comes from the Dockerfile's whole relative path plus any
+`Dockerfile.<variant>` suffix (`services/api/Dockerfile` ->
+`services-api`, `Dockerfile.dev` -> `dev`), so no two entries can collapse
+onto the same generated `repository:`. If the project's git `origin` remote
+points at GitHub, the generated `repository:` defaults to
+`ghcr.io/<owner>/<project>-<service>`; otherwise it falls back to a
+`registry.example.com/...` placeholder that needs editing by hand. Generated
+configs deliberately omit `tags:` so each run applies the tag defaults above.
 
 ## Nix
 
@@ -81,6 +114,14 @@ machine). Useful commands:
   `j-cicd` is on `PATH` globally (re-run after dependency/version changes).
 - `nix develop` — drop into a shell with `go` and `docker` available.
 
+The derivation builds `subPackages = [ "cmd/j-cicd" ]` and stamps the
+version in with `ldflags = [ "-X main.version=${version}" ]`, so the flake
+is the single source of truth for the version string and a plain `go build`
+outside Nix reports `dev`.
+
+Note that `src = ./.` under flakes only sees **git-tracked** files: a new
+file has to be `git add`ed before `nix build` can compile it.
+
 If `go.mod`/`go.sum` change (new or updated dependency), `vendorHash` in
 `flake.nix` needs to be recomputed: set it to `pkgs.lib.fakeHash`, run
 `nix build .#default`, and copy the "got:" hash from the mismatch error back
@@ -88,21 +129,38 @@ into `vendorHash`.
 
 ## CLI
 
-- `j-cicd init [project-dir]` — scaffold a starter `.cicd.yaml`.
+- `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
+  `.cicd.yaml`.
 - `j-cicd run [project-dir] [--config path] [--no-push]` — run the pipeline.
 - `j-cicd version`
 
+Flags work on either side of the project dir. Unknown flags and stray
+positional arguments are errors rather than being ignored. Exit codes: 0 ok,
+1 pipeline failed, 2 usage error, 3 config could not be loaded.
+
 ## Code structure
 
-- `main.go` stays minimal: it only calls `appStart()`.
-- `app.go` owns application startup and dispatches `os.Args` to a subcommand.
-- `commands.go` — CLI flag parsing per subcommand (`run`, `init`, `version`).
-- `config.go` — `.cicd.yaml` schema and loading/validation.
-- `pipeline.go` — runs a project's steps in order, stops on first failure.
-- `docker.go` — shells out to `docker build`/`docker push`, once per image.
-- `detect.go` — project inspection used by `init` (Dockerfile scan, GitHub
-  remote detection, go.mod/package.json detection).
-- `init.go` — assembles and writes a starter config using `detect.go`.
+- `cmd/j-cicd/` — `package main`: the CLI and nothing else.
+  - `main.go` stays minimal: it only calls `appStart()`.
+  - `app.go` owns application startup, dispatches `os.Args` to a
+    subcommand, and is the **only** place that calls `os.Exit` — subcommands
+    return errors (optionally wrapped in `exitError` to pick an exit code)
+    so deferred cleanup still runs and the future failure-investigation
+    agent is reachable after a failure.
+  - `commands.go` — CLI flag parsing per subcommand (`run`, `init`,
+    `version`), and all user-facing reporting for them.
+- `internal/config/` — `.cicd.yaml` schema, loading, defaulting, validation.
+  Shared with the future VPS agent, which needs to understand
+  `images:`/`repository:`/`tags:` to know what to pull.
+- `internal/pipeline/` — runs a project's steps in order, stops on first
+  failure, then builds/pushes each image.
+  - `pipeline.go` — the orchestration state machine.
+  - `docker.go` — assembles `docker build`/`docker push` invocations.
+  - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
+    implementation; `runner_unix.go` adds process-group cancellation.
+- `internal/detect/` — project inspection: Dockerfile scan, GitHub remote
+  and git revision detection (`detect.go`), and the `init` scaffolding built
+  on top of it (`starter.go`).
 - As more lands (VPS agent, failure-investigation agent), give it its own
   file or package rather than growing an existing one indefinitely.
 
@@ -110,6 +168,17 @@ into `vendorHash`.
 
 - Standard Go idioms: `gofmt`/`go vet` clean, camelCase identifiers,
   errors returned and handled explicitly (no panics for expected failures).
+- Exported identifiers mean "part of this package's API". Keep helpers
+  unexported; `package main` exports nothing.
+- All process-level I/O (printing, exiting, signal handling) belongs at the
+  command boundary in `cmd/j-cicd`, so the logic underneath stays callable
+  and testable. Progress output goes through `log` to stderr.
+- Anything that shells out goes through `pipeline.CommandRunner`, and
+  anything long-running takes a `context.Context` as its first parameter.
+- Features land with tests. The pure helpers (config validation,
+  `serviceName`, the Dockerfile scan over a `t.TempDir()`) are tested
+  directly; the runner is tested with a fake `CommandRunner` that records
+  the commands it was asked to run. `go test ./...` needs no docker daemon.
 - Prefer the standard library where practical; only reach for a dependency
   when it clearly earns its keep (e.g. a registry client, YAML parsing).
 - No half-finished features behind TODOs — land things when they work end

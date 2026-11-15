@@ -42,6 +42,12 @@ git worktree remove /tmp/st-prod
 This keeps your working tree untouched and makes the artifact traceable to a
 commit. It is also the only way to be sure what went into the image.
 
+j-cicd now makes a dirty build visible rather than preventing it: with no
+explicit `tags:`, images are tagged `latest` plus the short git revision of
+the directory being built, suffixed `-dirty` when the tree has uncommitted
+changes. A `...-dirty` tag in the registry means the image did not come from
+the commit it names.
+
 On our run this mattered concretely. The working tree had an in-progress
 `useItemInput.ts` referencing ten names that did not exist in the module.
 `vite build` strips types without resolving identifiers, so **the image built
@@ -56,22 +62,23 @@ docker rm $cid
 grep -rl "<symbol-from-your-wip>" ./assets-check/   # expect no match
 ```
 
-## Flag ordering: `-no-push` is positional-sensitive
+## Flag ordering: fixed, and why it bit
+
+On the first run, `-no-push` was silently ignored when it came *after* the
+project dir — the documented order — and the image was pushed anyway. It
+only failed to land because the token lacked `write:packages`; the safety
+net was an accident, not a design.
 
 ```sh
-j-cicd run . -no-push     # WRONG -- flag silently ignored, image IS pushed
-j-cicd run -no-push .     # correct
+j-cicd run . -no-push     # was: flag ignored, image pushed. now: no push
+j-cicd run -no-push .     # was and is: no push
 ```
 
-`cmdRun` calls `fs.Parse(args)` with the project dir still in `args`. Go's
-`flag` package stops parsing at the first non-flag argument, so `-no-push`
-lands in `fs.Args()` and is discarded without complaint. We hit this on the
-first run and pushed unintentionally (it only failed because the token lacked
-scope — the safety net was an accident, not a design).
-
-Worth fixing in `commands.go` so the tool errors on unconsumed `-`-prefixed
-arguments instead of failing open. A flag whose entire purpose is preventing a
-publish should never be ignorable.
+Both orders now work. `cmdRun` no longer parses the raw argv (Go's `flag`
+package stops at the first non-flag argument); it peels the project dir off
+and keeps parsing, and anything left unconsumed — an unknown flag, a second
+positional — is an error. A flag whose whole purpose is preventing a publish
+must never be ignorable.
 
 ## Keep image names in one place
 
@@ -187,6 +194,7 @@ verified serving and booting:
   worktree dance above is a workaround; `j-cicd run --ref <commit>` would
   remove the footgun.
 - **No digest output.** It reports success without printing the pushed
-  digest, so there is nothing to hand to a deploy step or to roll back to.
+  digest. The per-revision tag now gives a deploy something immutable to pin
+  and roll back to, but a digest would still be stronger.
 - **No deploy.** Pushing to GHCR does not restart anything. The VPS still has
   to pull — see [AGENT.md](AGENT.md).

@@ -2,6 +2,8 @@
 // project, then pushes the result to an image registry for deployment.
 package main
 
+import "os"
+
 func main() {
-	appStart()
+	os.Exit(appStart(os.Args[1:]))
 }
