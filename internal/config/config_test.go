@@ -205,3 +205,66 @@ func TestImageLabel(t *testing.T) {
 		t.Errorf("Label() = %q, want the repository", got)
 	}
 }
+
+func TestLoadDeployDefaults(t *testing.T) {
+	cfg := loadOK(t, `
+name: simple-track
+images:
+  - name: backend
+    repository: ghcr.io/o/be
+deploy:
+  host: deploy@vps
+`, "")
+	d := cfg.Deploy
+	if d.Command != DefaultAgentCommand || d.Project != "simple-track" {
+		t.Errorf("command/project = %q/%q, want %q/simple-track", d.Command, d.Project, DefaultAgentCommand)
+	}
+	if got := cfg.DeployImages(); len(got) != 1 || got[0].Name != "backend" {
+		t.Errorf("DeployImages = %v, want [backend]", got)
+	}
+}
+
+func TestLoadDeployTimeoutFallsBack(t *testing.T) {
+	cfg := loadOK(t, "name: d\ntimeout: 5m\nimages: [{repository: r}]\ndeploy: {host: h}\n", "")
+	if got := cfg.DeployTimeout(time.Hour); got != 5*time.Minute {
+		t.Errorf("DeployTimeout = %v, want the top-level 5m", got)
+	}
+	cfg = loadOK(t, "name: d\ntimeout: 5m\nimages: [{repository: r}]\ndeploy: {host: h, timeout: 2m}\n", "")
+	if got := cfg.DeployTimeout(time.Hour); got != 2*time.Minute {
+		t.Errorf("DeployTimeout = %v, want deploy's own 2m", got)
+	}
+}
+
+func TestLoadRejectsBadDeploy(t *testing.T) {
+	cases := map[string]struct{ body, want string }{
+		"missing host": {
+			"name: d\nimages: [{repository: r}]\ndeploy: {command: x}\n", "host is required",
+		},
+		"host looks like an ssh option": {
+			"name: d\nimages: [{repository: r}]\ndeploy: {host: -oProxyCommand=x}\n", "not a valid ssh destination",
+		},
+		"nothing to deploy": {
+			"name: d\nsteps: [{run: make}]\ndeploy: {host: h}\n", "no images",
+		},
+		// The name doubles as the agent's lock/state file name.
+		"unsafe project name": {
+			"name: my project\nimages: [{repository: r}]\ndeploy: {host: h}\n", "project \"my project\"",
+		},
+		"unknown image": {
+			"name: d\nimages: [{name: be, repository: r}]\ndeploy: {host: h, images: [fe]}\n", "no images: entry has that name",
+		},
+		"duplicate image": {
+			"name: d\nimages: [{name: be, repository: r}]\ndeploy: {host: h, images: [be, be]}\n", "twice",
+		},
+		"typo": {
+			"name: d\nimages: [{repository: r}]\ndeploy: {hostname: h}\n", "hostname",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := loadErr(t, tc.body); !strings.Contains(got, tc.want) {
+				t.Errorf("error = %q, want it to mention %q", got, tc.want)
+			}
+		})
+	}
+}

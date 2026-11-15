@@ -1,4 +1,3 @@
 /j-cicd
-/result
-/result-*
+/bin/
 /.claude/

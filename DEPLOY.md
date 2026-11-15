@@ -193,8 +193,9 @@ verified serving and booting:
 - **No clone / commit pinning.** Builds the directory you point it at. The
   worktree dance above is a workaround; `j-cicd run --ref <commit>` would
   remove the footgun.
-- **No digest output.** It reports success without printing the pushed
-  digest. The per-revision tag now gives a deploy something immutable to pin
-  and roll back to, but a digest would still be stronger.
-- **No deploy.** Pushing to GHCR does not restart anything. The VPS still has
-  to pull — see [AGENT.md](AGENT.md).
+
+Since this was written, a `deploy:` section in `.cicd.yaml` makes the run
+finish by deploying the per-commit tags it just pushed on the VPS through
+`j-cicd-agent`, which pins them to digests — see [AGENT.md](AGENT.md). It
+refuses dirty trees, which also closes the "half-finished work shipped to
+production" gap above for anything that deploys.

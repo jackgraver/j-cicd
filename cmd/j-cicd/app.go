@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"j-cicd/internal/cli"
 )
 
 // Exit codes. They're distinct so a CI caller can tell a config it needs
@@ -47,7 +49,7 @@ func appStart(args []string) int {
 	case "init":
 		err = cmdInit(args[1:])
 	case "version":
-		fmt.Println("j-cicd", version)
+		fmt.Println("j-cicd", cli.Version(version))
 	case "help", "-h", "--help":
 		printUsage()
 	default:

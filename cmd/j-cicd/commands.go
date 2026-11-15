@@ -5,28 +5,27 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"j-cicd/internal/cli"
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
 	"j-cicd/internal/pipeline"
 )
 
-// version is injected at build time (-ldflags "-X main.version=...") so
-// the packaging is the single source of truth; a plain `go build` is
-// honestly labelled "dev".
-var version = "dev"
+// version can be stamped at build time (-ldflags "-X main.version=v1.2");
+// otherwise cli.Version falls back to the git revision Go recorded.
+var version string
 
 func printUsage() {
 	fmt.Fprint(os.Stderr, `j-cicd - run a project's CI/CD pipeline from a config file it provides
 
 Usage:
-  j-cicd run [project-dir]     run the pipeline (build/test steps, then docker build+push)
+  j-cicd run [project-dir]     run the pipeline (steps, docker build+push, then deploy)
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
   j-cicd version               print the j-cicd version
 
@@ -35,34 +34,19 @@ Run "j-cicd <command> -h" for flags on a given command.
 }
 
 // parseCommandFlags parses args for a subcommand that takes an optional
-// project dir plus flags, in any order. It returns the project dir ("" if
-// none was given), and rejects anything left over rather than ignoring it.
-//
-// Go's flag package stops parsing at the first non-flag argument, so a
-// single Parse of the raw argv would leave every flag after the project
-// dir unconsumed and silently discarded — `j-cicd run . --no-push` would
-// push. Parsing repeatedly, peeling off one positional each time it
-// stops, makes flags work on either side of the project dir.
+// project dir plus flags, in any order (see cli.ParseInterleaved). It
+// returns the project dir ("" if none was given), and rejects anything
+// left over rather than ignoring it.
 func parseCommandFlags(fs *flag.FlagSet, args []string) (string, error) {
-	fs.SetOutput(io.Discard)
-
-	var positional []string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				fmt.Fprintf(os.Stderr, "Usage: j-cicd %s [project-dir] [flags]\n\nFlags:\n", fs.Name())
-				fs.SetOutput(os.Stderr)
-				fs.PrintDefaults()
-				return "", flag.ErrHelp
-			}
-			return "", fmt.Errorf("%w (run \"j-cicd %s -h\" for usage)", err, fs.Name())
+	positional, err := cli.ParseInterleaved(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(os.Stderr, "Usage: j-cicd %s [project-dir] [flags]\n\nFlags:\n", fs.Name())
+			fs.SetOutput(os.Stderr)
+			fs.PrintDefaults()
+			return "", flag.ErrHelp
 		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positional, rest = append(positional, rest[0]), rest[1:]
+		return "", fmt.Errorf("%w (run \"j-cicd %s -h\" for usage)", err, fs.Name())
 	}
 
 	if len(positional) > 1 {
@@ -79,19 +63,26 @@ type runArgs struct {
 	projectDir string
 	configPath string
 	push       bool
+	// deploy is false for --no-deploy: build and push, but don't ask the
+	// VPS to roll out what was pushed.
+	deploy bool
+	// deployDirty allows deploying a build with uncommitted changes.
+	deployDirty bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
-	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it")
+	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it (implies --no-deploy)")
+	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
+	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
 
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush}
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, deploy: !*noDeploy, deployDirty: *deployDirty}
 	if parsed.projectDir == "" {
 		// A --config with no project dir means "run that project": its
 		// steps, step dirs, dockerfiles and build contexts all resolve
@@ -135,7 +126,12 @@ func cmdRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := pipeline.New(parsed.projectDir, pipeline.Options{Push: parsed.push})
+	p := pipeline.New(parsed.projectDir, pipeline.Options{
+		Push:        parsed.push,
+		Deploy:      parsed.deploy,
+		Revision:    revision,
+		DeployDirty: parsed.deployDirty,
+	})
 	if err := p.Run(ctx, cfg); err != nil {
 		return fmt.Errorf("pipeline failed: %w", err)
 	}

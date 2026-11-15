@@ -16,50 +16,60 @@ func TestParseRunArgs(t *testing.T) {
 		{
 			name: "no arguments",
 			args: nil,
-			want: runArgs{projectDir: ".", configPath: filepath.Join(".", ".cicd.yaml"), push: true},
+			want: runArgs{projectDir: ".", configPath: filepath.Join(".", ".cicd.yaml"), push: true, deploy: true},
 		},
 		{
 			name: "project dir only",
 			args: []string{"/proj"},
-			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: true},
 		},
 		{
 			// The documented order, and the one that used to push anyway.
 			name: "flag after project dir",
 			args: []string{"/proj", "--no-push"},
-			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false, deploy: true},
 		},
 		{
 			name: "flag before project dir",
 			args: []string{"--no-push", "/proj"},
-			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false, deploy: true},
 		},
 		{
 			name: "single dash flag after project dir",
 			args: []string{"/proj", "-no-push"},
-			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: false, deploy: true},
 		},
 		{
 			name: "config after project dir",
 			args: []string{"/proj", "--config", "/elsewhere/pipeline.yaml"},
-			want: runArgs{projectDir: "/proj", configPath: "/elsewhere/pipeline.yaml", push: true},
+			want: runArgs{projectDir: "/proj", configPath: "/elsewhere/pipeline.yaml", push: true, deploy: true},
 		},
 		{
 			// --config alone means "run that project", not "run the cwd
 			// with another project's config".
 			name: "config without project dir",
 			args: []string{"--config", "/other/.cicd.yaml"},
-			want: runArgs{projectDir: "/other", configPath: "/other/.cicd.yaml", push: true},
+			want: runArgs{projectDir: "/other", configPath: "/other/.cicd.yaml", push: true, deploy: true},
 		},
 		{
 			name: "both flags after project dir",
 			args: []string{"/proj", "--config", "/proj/ci.yaml", "--no-push"},
-			want: runArgs{projectDir: "/proj", configPath: "/proj/ci.yaml", push: false},
+			want: runArgs{projectDir: "/proj", configPath: "/proj/ci.yaml", push: false, deploy: true},
 		},
 		{
 			name: "flags on both sides",
 			args: []string{"--no-push", "/proj", "--config=/proj/ci.yaml"},
-			want: runArgs{projectDir: "/proj", configPath: "/proj/ci.yaml", push: false},
+			want: runArgs{projectDir: "/proj", configPath: "/proj/ci.yaml", push: false, deploy: true},
+		},
+		{
+			name: "deploy-dirty",
+			args: []string{"--deploy-dirty", "/proj"},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: true, deployDirty: true},
+		},
+		{
+			name: "no-deploy after project dir",
+			args: []string{"/proj", "--no-deploy"},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: false},
 		},
 	}
 

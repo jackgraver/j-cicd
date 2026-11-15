@@ -1,8 +1,7 @@
 // Package config defines the .cicd.yaml schema that a project uses to
 // describe its own pipeline, plus loading, defaulting, and validation of
-// it. It is shared by the runner and (in future) the VPS-side deploy
-// agent, which needs to understand images:/repository:/tags: to know what
-// to pull.
+// it. It is shared by the runner and the VPS-side deploy agent, which
+// validates project names the same way.
 package config
 
 import (
@@ -32,6 +31,9 @@ type Config struct {
 	Timeout *Duration `yaml:"timeout,omitempty"`
 	Steps   []Step    `yaml:"steps,omitempty"`
 	Images  []Image   `yaml:"images,omitempty"`
+	// Deploy, when set, hands the pushed images to the deploy agent on
+	// the VPS as the last stage of the run.
+	Deploy *Deploy `yaml:"deploy,omitempty"`
 }
 
 // Step is a single shell command run as part of the pipeline (build, test,
@@ -186,6 +188,11 @@ func (c *Config) applyDefaults(revision string) error {
 		}
 	}
 
+	if c.Deploy != nil {
+		if err := c.Deploy.applyDefaults(c); err != nil {
+			return fmt.Errorf("deploy: %w", err)
+		}
+	}
 	return nil
 }
 
