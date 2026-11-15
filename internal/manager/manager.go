@@ -35,6 +35,9 @@ func TargetFor(p store.Project) Target {
 // Options are the per-invocation settings of a run.
 type Options struct {
 	Push bool
+	// Deploy runs the config's deploy: stage after pushing; DeployDirty
+	// allows that for a build of uncommitted changes.
+	Deploy, DeployDirty bool
 	// Echo, if set, also receives everything written to the run log (the
 	// CLI passes stderr so a foreground run is visible as it happens).
 	Echo io.Writer
@@ -154,7 +157,14 @@ func execute(ctx context.Context, dir, configPath, revision string, opts Options
 		// they were written.
 		runner = pipeline.ExecRunner{Stdout: out, Stderr: out}
 	}
-	p := pipeline.New(dir, pipeline.Options{Push: opts.Push, Runner: runner, Logger: logger})
+	p := pipeline.New(dir, pipeline.Options{
+		Push:        opts.Push,
+		Deploy:      opts.Deploy,
+		Revision:    revision,
+		DeployDirty: opts.DeployDirty,
+		Runner:      runner,
+		Logger:      logger,
+	})
 	if err := p.Run(ctx, cfg); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("cancelled: %w", err)

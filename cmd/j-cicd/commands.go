@@ -19,10 +19,9 @@ import (
 	"j-cicd/internal/store"
 )
 
-// version is injected at build time (-ldflags "-X main.version=...") so
-// the packaging is the single source of truth; a plain `go build` is
-// honestly labelled "dev".
-var version = "dev"
+// version can be stamped at build time (-ldflags "-X main.version=v1.2");
+// otherwise cli.Version falls back to the git revision Go recorded.
+var version string
 
 func printUsage() {
 	fmt.Fprint(os.Stderr, `j-cicd - build, test and ship your projects from one place
@@ -35,7 +34,7 @@ Usage:
   j-cicd remove <name>         unregister a project (its history is kept)
   j-cicd list                  list projects and their latest result
 
-  j-cicd run [name|dir]        run a pipeline (steps, then docker build+push)
+  j-cicd run [name|dir]        run a pipeline (steps, docker build+push, then deploy)
   j-cicd history [name]        list recorded runs, newest first
   j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
   j-cicd cancel <run-id|name>  stop a run in progress
@@ -66,20 +65,27 @@ type runArgs struct {
 	configPath string
 	push       bool
 	quiet      bool
+	// deploy is false for --no-deploy: build and push, but don't ask the
+	// VPS to roll out what was pushed.
+	deploy bool
+	// deployDirty allows deploying a build with uncommitted changes.
+	deployDirty bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
-	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it")
+	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it (implies --no-deploy)")
 	quiet := fs.Bool("quiet", false, "don't echo the run's output (it's still recorded; see j-cicd logs)")
+	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
+	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
 
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet}
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty}
 	if parsed.projectDir == "" {
 		// A --config with no project dir means "run that project": its
 		// steps, step dirs, dockerfiles and build contexts all resolve
@@ -121,7 +127,7 @@ func cmdRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	opts := manager.Options{Push: parsed.push}
+	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty}
 	if !parsed.quiet {
 		opts.Echo = os.Stderr
 	}

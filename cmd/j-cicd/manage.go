@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"j-cicd/internal/cli"
 	"j-cicd/internal/config"
 	"j-cicd/internal/display"
 	"j-cicd/internal/manager"
@@ -27,24 +28,15 @@ import (
 // Parsing repeatedly, peeling off one positional each time it stops, makes
 // flags work on either side of the positionals.
 func parseFlagsOnly(fs *flag.FlagSet, args []string, usage string, minArgs, maxArgs int) ([]string, error) {
-	fs.SetOutput(io.Discard)
-	var positional []string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				fmt.Fprintf(os.Stderr, "Usage: j-cicd %s %s\n", fs.Name(), usage)
-				fs.SetOutput(os.Stderr)
-				fs.PrintDefaults()
-				return nil, flag.ErrHelp
-			}
-			return nil, usageError(fmt.Errorf("%w (run \"j-cicd %s -h\" for usage)", err, fs.Name()))
+	positional, err := cli.ParseInterleaved(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(os.Stderr, "Usage: j-cicd %s %s\n", fs.Name(), usage)
+			fs.SetOutput(os.Stderr)
+			fs.PrintDefaults()
+			return nil, flag.ErrHelp
 		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positional, rest = append(positional, rest[0]), rest[1:]
+		return nil, usageError(fmt.Errorf("%w (run \"j-cicd %s -h\" for usage)", err, fs.Name()))
 	}
 	if len(positional) < minArgs || len(positional) > maxArgs {
 		return nil, usageError(fmt.Errorf("usage: j-cicd %s %s", fs.Name(), usage))

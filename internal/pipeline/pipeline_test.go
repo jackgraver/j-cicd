@@ -39,6 +39,12 @@ func (f *fakeRunner) Run(ctx context.Context, dir, name string, args ...string) 
 	return nil
 }
 
+// Output records the call like Run; the pipeline itself never needs
+// command output, so it returns none.
+func (f *fakeRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	return nil, f.Run(ctx, dir, name, args...)
+}
+
 func testPipeline(projectDir string, runner CommandRunner, push bool) *Pipeline {
 	return New(projectDir, Options{
 		Push:   push,

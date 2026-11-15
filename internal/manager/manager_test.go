@@ -30,6 +30,11 @@ func (f *fakeRunner) Run(ctx context.Context, dir, name string, args ...string) 
 	return nil
 }
 
+// Output records the call like Run; these tests never need command output.
+func (f *fakeRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	return nil, f.Run(ctx, dir, name, args...)
+}
+
 func setup(t *testing.T, config string) (*store.Store, Target) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
