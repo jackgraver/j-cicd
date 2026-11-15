@@ -10,4 +10,6 @@ A self-hosted CI/CD pipeline tool written in Go. Single binary, no heavyweight C
 
 **Status:** Basic CI/CD runner works end-to-end. VPS deploy agent and failure investigation coming soon.
 
-For more details, see [CLAUDE.md](CLAUDE.md).
+For more details, see [CLAUDE.md](CLAUDE.md). For running it against a real
+project, see [DEPLOY.md](DEPLOY.md); for the planned VPS deploy agent, see
+[AGENT.md](AGENT.md).
