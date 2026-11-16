@@ -22,6 +22,7 @@ GOBIN=~/.local/bin go install ./cmd/...   # from a checkout; re-run after pullin
 j-cicd add ~/code/my-app      # register (needs a .cicd.yaml; see j-cicd init)
 j-cicd run my-app             # run it from anywhere
 j-cicd history                # what ran, when, and how it went
+j-cicd rollback my-app        # revert the last deploy on the VPS (images, not the database)
 j-cicd                        # dashboard: pick a project, run, watch logs
 ```
 

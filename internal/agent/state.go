@@ -12,11 +12,12 @@ import (
 
 // Deploy outcomes recorded in ServiceState.LastResult.
 const (
-	resultHealthy        = "healthy"
-	resultRolledBack     = "failed, rolled back"
-	resultRollbackFailed = "failed, rollback failed"
-	resultNoRollback     = "failed, no previous release to roll back to"
-	resultUntouched      = "failed to pull, nothing changed"
+	resultHealthy         = "healthy"
+	resultRolledBack      = "failed, rolled back"
+	resultRollbackFailed  = "failed, rollback failed"
+	resultNoRollback      = "failed, no previous release to roll back to"
+	resultUntouched       = "failed to pull, nothing changed"
+	resultPreDeployFailed = "pre_deploy failed, nothing changed"
 )
 
 // State is what the agent remembers about one project between deploys:
@@ -36,6 +37,10 @@ type ServiceState struct {
 	// CurrentTag is the tag Current was deployed as (normally the
 	// commit it was built from), for humans; the digest is what's used.
 	CurrentTag string `json:"current_tag,omitempty"`
+	// CurrentSince is when Current was deployed. The services sharing
+	// the latest one are what the most recent deploy changed, and so
+	// what `rollback` reverts.
+	CurrentSince time.Time `json:"current_since,omitzero"`
 	// Previous is the release Current replaced.
 	Previous    string `json:"previous,omitempty"`
 	PreviousTag string `json:"previous_tag,omitempty"`
@@ -43,6 +48,16 @@ type ServiceState struct {
 	LastAttempt string    `json:"last_attempt,omitempty"`
 	LastDeploy  time.Time `json:"last_deploy,omitzero"`
 	LastResult  string    `json:"last_result,omitempty"`
+}
+
+// since is when Current was deployed. State written before CurrentSince
+// existed falls back to the last deploy attempt, which is the same thing
+// unless a later deploy of this service failed.
+func (ss *ServiceState) since() time.Time {
+	if !ss.CurrentSince.IsZero() {
+		return ss.CurrentSince
+	}
+	return ss.LastDeploy
 }
 
 func statePath(stateDir, project string) string {

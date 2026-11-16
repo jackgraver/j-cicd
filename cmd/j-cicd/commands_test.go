@@ -149,6 +149,9 @@ func TestAppStartExitCodes(t *testing.T) {
 		// A config j-cicd can't even read is distinct from a pipeline
 		// that ran and failed, so CI callers can tell them apart.
 		{"missing config", []string{"run", filepath.Join(t.TempDir(), "nope")}, exitConfig},
+		{"rollback bad flag", []string{"rollback", "--nope"}, exitUsage},
+		{"rollback two targets", []string{"rollback", "a", "b"}, exitUsage},
+		{"rollback unknown project", []string{"rollback", "no-such-project"}, exitConfig},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -76,25 +76,13 @@ func Busy(st *store.Store, project string) (store.Run, bool, error) {
 // its config fails to load, so a broken config shows up in history rather
 // than vanishing.
 func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Run, error) {
-	// The lock, not the run history, is what makes this exclusive: two
-	// launches a moment apart would both see no run in progress.
-	unlock, err := st.LockProject(t.Name)
-	if errors.Is(err, store.ErrLocked) {
-		if active, busy, _ := Busy(st, t.Name); busy {
-			return active, fmt.Errorf("%s: %w (run %s)", t.Name, ErrBusy, active.ID)
-		}
-		return store.Run{}, fmt.Errorf("%s: %w", t.Name, ErrBusy)
-	}
+	unlock, err := lock(st, t)
 	if err != nil {
 		return store.Run{}, err
 	}
 	defer unlock()
 
-	dir, err := filepath.Abs(t.Dir)
-	if err != nil {
-		return store.Run{}, err
-	}
-	configPath, err := filepath.Abs(t.ConfigPath)
+	dir, configPath, err := absPaths(t)
 	if err != nil {
 		return store.Run{}, err
 	}
@@ -115,13 +103,90 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		}
 	}
 
-	h, err := st.StartRun(store.Run{
+	return record(ctx, st, store.Run{
 		Project:  t.Name,
 		Dir:      dir,
 		Config:   configPath,
 		Revision: revision,
 		Push:     opts.Push,
+	}, opts, fmt.Sprintf("of %q in %s", t.Name, dir), func(out io.Writer, logger *log.Logger) error {
+		if !hasRevision && relErr == nil {
+			logger.Printf("no git revision for %s — images will only be tagged \"latest\"", dir)
+		}
+		if relErr != nil {
+			return relErr
+		}
+		return prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, out, logger)
 	})
+}
+
+// Rollback reverts t's last deploy: the deploy host's agent puts each
+// service the last deploy changed back on the release it replaced, and
+// health-checks it. It's recorded like a run (kind rollback) and holds the
+// project's lock, so it can't interleave with a build of the same project.
+// The deploy: section comes from the project's config as it is on disk.
+func Rollback(ctx context.Context, st *store.Store, t Target, opts Options) (store.Run, error) {
+	unlock, err := lock(st, t)
+	if err != nil {
+		return store.Run{}, err
+	}
+	defer unlock()
+
+	dir, configPath, err := absPaths(t)
+	if err != nil {
+		return store.Run{}, err
+	}
+	return record(ctx, st, store.Run{
+		Project: t.Name,
+		Kind:    store.KindRollback,
+		Dir:     dir,
+		Config:  configPath,
+	}, opts, fmt.Sprintf("rolling back %q's last deploy", t.Name), func(out io.Writer, logger *log.Logger) error {
+		cfg, err := config.Load(configPath, "")
+		if err != nil {
+			return &ConfigError{Err: err}
+		}
+		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, out), Logger: logger})
+		if err := p.Rollback(ctx, cfg); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("cancelled: %w", err)
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+// lock takes the project's run lock. The lock, not the run history, is
+// what makes a run exclusive: two launches a moment apart would both see
+// no run in progress.
+func lock(st *store.Store, t Target) (func(), error) {
+	unlock, err := st.LockProject(t.Name)
+	if errors.Is(err, store.ErrLocked) {
+		if active, busy, _ := Busy(st, t.Name); busy {
+			return nil, fmt.Errorf("%s: %w (run %s)", t.Name, ErrBusy, active.ID)
+		}
+		return nil, fmt.Errorf("%s: %w", t.Name, ErrBusy)
+	}
+	return unlock, err
+}
+
+func absPaths(t Target) (dir, configPath string, err error) {
+	if dir, err = filepath.Abs(t.Dir); err != nil {
+		return "", "", err
+	}
+	if configPath, err = filepath.Abs(t.ConfigPath); err != nil {
+		return "", "", err
+	}
+	return dir, configPath, nil
+}
+
+// record starts r in the store, logs its ID and what it is, runs fn with a
+// logger writing to the run's log (and opts.Echo), and records how it
+// ended. A run is recorded even
+// when fn fails before doing anything, so it shows up in history.
+func record(ctx context.Context, st *store.Store, r store.Run, opts Options, what string, fn func(io.Writer, *log.Logger) error) (store.Run, error) {
+	h, err := st.StartRun(r)
 	if err != nil {
 		return store.Run{}, err
 	}
@@ -131,15 +196,9 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		out = io.MultiWriter(h.Log, opts.Echo)
 	}
 	logger := log.New(out, "", log.LstdFlags)
-	logger.Printf("run %s of %q in %s", h.Run.ID, t.Name, dir)
-	if !hasRevision && relErr == nil {
-		logger.Printf("no git revision for %s — images will only be tagged \"latest\"", dir)
-	}
+	logger.Printf("run %s %s", h.Run.ID, what)
 
-	runErr := relErr
-	if runErr == nil {
-		runErr = prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, out, logger)
-	}
+	runErr := fn(out, logger)
 
 	status := store.StatusSuccess
 	switch {
@@ -161,6 +220,16 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		return h.Run, errors.Join(runErr, err)
 	}
 	return h.Run, runErr
+}
+
+// runnerFor is opts.Runner, else real processes writing to out. One
+// writer for both streams keeps stdout and stderr in the order they were
+// written.
+func runnerFor(opts Options, out io.Writer) pipeline.CommandRunner {
+	if opts.Runner != nil {
+		return opts.Runner
+	}
+	return pipeline.ExecRunner{Stdout: out, Stderr: out}
 }
 
 // prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
@@ -205,12 +274,7 @@ func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revi
 }
 
 func execute(ctx context.Context, dir string, cfg *config.Config, revision string, opts Options, out io.Writer, logger *log.Logger) error {
-	runner := opts.Runner
-	if runner == nil {
-		// One writer for both streams keeps stdout and stderr in the order
-		// they were written.
-		runner = pipeline.ExecRunner{Stdout: out, Stderr: out}
-	}
+	runner := runnerFor(opts, out)
 	p := pipeline.New(dir, pipeline.Options{
 		Push:        opts.Push,
 		Deploy:      opts.Deploy,

@@ -131,7 +131,71 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) e
 	if err != nil {
 		return err
 	}
+	return a.locked(ctx, proj, func(st *State) error {
+		return a.deploy(ctx, proj, st, releases)
+	})
+}
 
+// Rollback reverts the most recent successful deploy of the project: each
+// service it changed goes back to the release it replaced, through the
+// same pull, pre_deploy, start and health check as any deploy (and the
+// same automatic rollback if that fails). Services the last deploy didn't
+// touch stay as they are. Running it again undoes it, since the release
+// rolled back from becomes the previous one.
+//
+// Only images are rolled back. Whatever the replaced release did to its
+// database stays done.
+func (a *Agent) Rollback(ctx context.Context, projectName string) error {
+	proj, err := a.cfg.Project(projectName)
+	if err != nil {
+		return err
+	}
+	return a.locked(ctx, proj, func(st *State) error {
+		releases, err := lastDeployed(proj, st)
+		if err != nil {
+			return err
+		}
+		a.log.Printf("rolling back %q's last deploy to %s", proj.Name, describe(releases))
+		a.log.Printf("note: only images are rolled back — database changes made by the release being replaced are not undone")
+		return a.deploy(ctx, proj, st, releases)
+	})
+}
+
+// lastDeployed returns, for each service changed by the most recent
+// successful deploy, its previous release.
+func lastDeployed(proj *Project, st *State) ([]release, error) {
+	var latest time.Time
+	for i := range proj.Services {
+		if ss := st.Services[proj.Services[i].Name]; ss != nil && ss.Current != "" && ss.since().After(latest) {
+			latest = ss.since()
+		}
+	}
+	if latest.IsZero() {
+		return nil, fmt.Errorf("%q has never been deployed: nothing to roll back", proj.Name)
+	}
+	var out []release
+	var stranded []string
+	for i := range proj.Services {
+		svc := &proj.Services[i]
+		ss := st.Services[svc.Name]
+		if ss == nil || ss.Current == "" || !ss.since().Equal(latest) {
+			continue
+		}
+		if ss.Previous == "" {
+			stranded = append(stranded, svc.Name)
+			continue
+		}
+		out = append(out, release{svc: svc, ref: ss.Previous, tag: ss.PreviousTag, digest: ss.Previous})
+	}
+	if len(stranded) > 0 {
+		return nil, fmt.Errorf("no previous release of %v recorded (it was the first deploy): nothing to roll back to", stranded)
+	}
+	return out, nil
+}
+
+// locked runs fn with the project's deploy lock held and its state loaded,
+// so two deploys (or a deploy and a rollback) can't interleave.
+func (a *Agent) locked(ctx context.Context, proj *Project, fn func(*State) error) error {
 	if err := os.MkdirAll(a.cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
 	}
@@ -147,21 +211,18 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) e
 	if err != nil {
 		return err
 	}
+	return fn(st)
+}
 
+// deploy is Deploy's body, with the lock held and state loaded.
+func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases []release) error {
 	dctx, cancel := context.WithTimeout(ctx, proj.timeout())
 	defer cancel()
 
 	// Pull and resolve first, separately: if the registry is unreachable
 	// or the tag doesn't exist, nothing has been touched yet.
 	if err := a.pull(dctx, proj, st, releases); err != nil {
-		now := a.now().UTC()
-		for _, r := range releases {
-			ss := st.service(r.svc)
-			ss.LastAttempt, ss.LastDeploy, ss.LastResult = r.ref, now, resultUntouched
-		}
-		if serr := st.save(a.cfg.StateDir, proj.Name); serr != nil {
-			a.log.Printf("warning: recording the failed deploy: %v", serr)
-		}
+		a.recordUntouched(proj, st, releases, resultUntouched)
 		return fmt.Errorf("%w (nothing was changed)", err)
 	}
 
@@ -182,6 +243,13 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) e
 		return nil
 	}
 
+	// After the pull (a release that can't be pulled shouldn't cost a
+	// backup) and before anything changes (so a failed backup blocks it).
+	if err := a.preDeploy(dctx, proj, changed); err != nil {
+		a.recordUntouched(proj, st, changed, resultPreDeployFailed)
+		return fmt.Errorf("pre_deploy failed: %w (nothing was changed)", err)
+	}
+
 	a.log.Printf("deploying %s", describe(changed))
 	deployErr := a.start(dctx, proj, st, changed)
 	now := a.now().UTC()
@@ -193,7 +261,7 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) e
 		for _, r := range changed {
 			ss := st.service(r.svc)
 			ss.Previous, ss.PreviousTag = ss.Current, ss.CurrentTag
-			ss.Current, ss.CurrentTag, ss.LastResult = r.digest, r.tag, resultHealthy
+			ss.Current, ss.CurrentTag, ss.CurrentSince, ss.LastResult = r.digest, r.tag, now, resultHealthy
 		}
 		if err := st.save(a.cfg.StateDir, proj.Name); err != nil {
 			return fmt.Errorf("deploy succeeded but recording it failed: %w", err)
@@ -216,6 +284,36 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) e
 		return fmt.Errorf("%w; ROLLBACK FAILED, needs attention: %v", deployErr, rbErr)
 	}
 	return fmt.Errorf("%w (rolled back to the previous release)", deployErr)
+}
+
+// recordUntouched records a deploy that stopped before changing anything.
+func (a *Agent) recordUntouched(proj *Project, st *State, rs []release, result string) {
+	now := a.now().UTC()
+	for _, r := range rs {
+		ss := st.service(r.svc)
+		ss.LastAttempt, ss.LastDeploy, ss.LastResult = r.ref, now, result
+	}
+	if err := st.save(a.cfg.StateDir, proj.Name); err != nil {
+		a.log.Printf("warning: recording the failed deploy: %v", err)
+	}
+}
+
+// preDeploy runs the project's pre_deploy command, if it has one, with
+// what's about to change in its environment.
+func (a *Agent) preDeploy(ctx context.Context, proj *Project, changed []release) error {
+	if proj.PreDeploy == "" {
+		return nil
+	}
+	var parts []string
+	for _, r := range changed {
+		parts = append(parts, r.svc.Name+"="+shortLabel(r))
+	}
+	a.log.Printf("pre_deploy: %s", proj.PreDeploy)
+	return a.runner.Run(ctx, filepath.Dir(proj.ComposeFile), "env",
+		"J_CICD_PROJECT="+proj.Name,
+		"J_CICD_SERVICES="+strings.Join(serviceNames(changed), " "),
+		"J_CICD_RELEASE="+strings.Join(parts, " "),
+		"sh", "-c", proj.PreDeploy)
 }
 
 // pull fetches each release as requested, then fills in the digest it
@@ -487,4 +585,12 @@ func shortID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// shortLabel is label without the digest: the tag, else the short digest.
+func shortLabel(r release) string {
+	if r.tag != "" {
+		return r.tag
+	}
+	return ShortDigest(r.digest)
 }

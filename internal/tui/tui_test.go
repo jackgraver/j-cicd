@@ -178,3 +178,46 @@ func TestWrap(t *testing.T) {
 		t.Errorf("wrap of empty = %q", got)
 	}
 }
+
+func TestRollbackNeedsConfirmation(t *testing.T) {
+	m, _ := newTestModel(t, "alpha", "beta")
+	var rollbacks []string
+	m.opts.Rollback = func(p string) error {
+		rollbacks = append(rollbacks, p)
+		return nil
+	}
+	press(m, "down", "R")
+	if len(rollbacks) != 0 {
+		t.Fatal("rolled back without confirmation")
+	}
+	if !strings.Contains(m.View(), "ROLL BACK beta's last deploy") {
+		t.Errorf("no confirmation prompt shown:\n%s", m.View())
+	}
+	press(m, "n", "R", "y")
+	if len(rollbacks) != 1 || rollbacks[0] != "beta" {
+		t.Errorf("rollbacks = %v, want one of beta", rollbacks)
+	}
+}
+
+func TestRollbackRunShowsItsMode(t *testing.T) {
+	m, _ := newTestModel(t, "alpha")
+	h, err := m.st.StartRun(store.Run{Project: "alpha", Kind: store.KindRollback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finish(store.StatusSuccess, ""); err != nil {
+		t.Fatal(err)
+	}
+	m.reload()
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 30}) // room for the mode column
+	// The help line mentions "R rollback" too, so look for the run's row.
+	found := false
+	for _, line := range strings.Split(m.View(), "\n") {
+		if strings.Contains(line, "rollback") && !strings.Contains(line, "R rollback") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("rollback run not labelled:\n%s", m.View())
+	}
+}

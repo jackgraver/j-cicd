@@ -28,8 +28,11 @@ type Options struct {
 	Store *store.Store
 	// Launch starts a background run of project. It returns once the run
 	// is launched, not when it finishes.
-	Launch  func(project string, push bool) error
-	Version string
+	Launch func(project string, push bool) error
+	// Rollback starts a background rollback of project's last deploy,
+	// returning once it's launched. Nil hides the action.
+	Rollback func(project string) error
+	Version  string
 }
 
 // Run shows the dashboard until the user quits.
@@ -258,6 +261,8 @@ func (m *model) handleKey(key string) tea.Cmd {
 		m.startRun(true)
 	case "b":
 		m.startRun(false)
+	case "R":
+		m.askRollback()
 	case "x":
 		if p, ok := m.selectedProject(); ok {
 			if r, ok := m.last[p.Name]; ok && !r.Status.Done() {
@@ -316,6 +321,33 @@ func (m *model) startRun(push bool) {
 	m.confirm = &confirmation{
 		prompt: fmt.Sprintf("Build and PUSH %s? [y/N]", p.Name),
 		action: launch,
+	}
+}
+
+// askRollback reverts the selected project's last deploy, after a y/N:
+// it changes what production runs.
+func (m *model) askRollback() {
+	p, ok := m.selectedProject()
+	if !ok || m.opts.Rollback == nil {
+		return
+	}
+	if r, ok := m.last[p.Name]; ok && !r.Status.Done() {
+		m.setFlash(fmt.Sprintf("%s is already running (%s)", p.Name, r.ID), true)
+		return
+	}
+	m.confirm = &confirmation{
+		prompt: fmt.Sprintf("ROLL BACK %s's last deploy on the VPS? Images only — database changes stay. [y/N]", p.Name),
+		action: func() tea.Cmd {
+			m.launchedAt = time.Now().Truncate(time.Second)
+			if err := m.opts.Rollback(p.Name); err != nil {
+				m.launchedAt = time.Time{}
+				m.setFlash("rollback failed to start: "+err.Error(), true)
+				return nil
+			}
+			m.setFlash("started rollback of "+p.Name, false)
+			m.focus = paneRuns
+			return nil
+		},
 	}
 }
 
@@ -438,7 +470,7 @@ func (m *model) viewFooter() string {
 	if m.log != nil {
 		keys = "↑↓/pgup/pgdn scroll · g/G top/bottom · F follow · x cancel run · esc back"
 	} else {
-		keys = "↑↓ select · tab pane · enter open · o latest log · r run+push · b build only · x cancel · q quit"
+		keys = "↑↓ select · tab pane · enter open · o latest log · r run+push · b build only · R rollback · x cancel · q quit"
 	}
 	return truncate(line, m.width) + "\n" + styleDim.Render(truncate(keys, m.width))
 }

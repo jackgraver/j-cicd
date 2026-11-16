@@ -45,18 +45,33 @@ func (p *Pipeline) deployRefs(cfg *config.Config) ([]string, error) {
 // whether the run passed: a deploy that failed health checks (and was
 // rolled back) fails the pipeline.
 func (p *Pipeline) runDeploy(ctx context.Context, cfg *config.Config, refs []string) error {
-	d := cfg.Deploy
-	args := sshArgs(d, refs)
+	args := sshArgs(cfg.Deploy, "deploy", refs...)
 	p.log.Printf("[deploy] ssh %s", strings.Join(args, " "))
 	return p.exec(ctx, cfg.DeployTimeout(DefaultTimeout), "", "ssh", args...)
 }
 
-// sshArgs builds the ssh argv. ssh joins everything after the destination
-// into one string for the remote shell, so each agent argument is quoted;
-// deploy.command is deliberately left unquoted so it can be a snippet like
-// "sudo j-cicd-agent".
-func sshArgs(d *config.Deploy, refs []string) []string {
-	remote := []string{d.Command, "deploy", shellQuote(d.Project)}
+// Rollback asks the agent on the deploy host to revert the project's last
+// deploy, over the same ssh path as a deploy. The agent decides what that
+// means (it alone knows what was deployed) and health-checks the result;
+// its exit status is the rollback's.
+func (p *Pipeline) Rollback(ctx context.Context, cfg *config.Config) error {
+	if cfg.Deploy == nil {
+		return fmt.Errorf("%q has no deploy: section, so there is nothing to roll back", cfg.Name)
+	}
+	args := sshArgs(cfg.Deploy, "rollback")
+	p.log.Printf("[rollback] ssh %s", strings.Join(args, " "))
+	if err := p.exec(ctx, cfg.DeployTimeout(DefaultTimeout), "", "ssh", args...); err != nil {
+		return fmt.Errorf("rollback on %s failed: %w", cfg.Deploy.Host, err)
+	}
+	return nil
+}
+
+// sshArgs builds the ssh argv for an agent subcommand on the project. ssh
+// joins everything after the destination into one string for the remote
+// shell, so each agent argument is quoted; deploy.command is deliberately
+// left unquoted so it can be a snippet like "sudo j-cicd-agent".
+func sshArgs(d *config.Deploy, subcommand string, refs ...string) []string {
+	remote := []string{d.Command, subcommand, shellQuote(d.Project)}
 	for _, r := range refs {
 		remote = append(remote, shellQuote(r))
 	}

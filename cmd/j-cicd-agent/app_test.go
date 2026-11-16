@@ -35,6 +35,10 @@ projects:
 		{"deploy missing config", []string{"deploy", "--config", filepath.Join(dir, "nope"), "st", ref}, exitConfig},
 		// Rejected before docker is ever invoked.
 		{"deploy tag", []string{"deploy", "--config", cfgPath, "st", "ghcr.io/o/be:latest"}, exitFailure},
+		{"rollback without project", []string{"rollback", "--config", cfgPath}, exitUsage},
+		{"rollback two projects", []string{"rollback", "--config", cfgPath, "st", "st"}, exitUsage},
+		// Never deployed: refused before docker is ever invoked.
+		{"rollback never deployed", []string{"rollback", "--config", cfgPath, "st"}, exitFailure},
 		{"status", []string{"status", "--config", cfgPath}, exitOK},
 		{"status flag after project", []string{"status", "st", "--config", cfgPath}, exitOK},
 		{"status unknown project", []string{"status", "nope", "--config", cfgPath}, exitUsage},

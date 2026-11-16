@@ -39,7 +39,11 @@ stage runs `ssh <host> j-cicd-agent deploy <project> <repo:<commit>>...`.
 The agent on the VPS pulls that per-commit tag, pins it to the digest it
 resolved to, recreates only the compose services whose digest changed,
 waits for their healthchecks, and rolls back to the last healthy release
-on failure; its exit status passes or fails the run. See [AGENT.md](AGENT.md) for the
+on failure; its exit status passes or fails the run. An optional
+`pre_deploy` command in the agent's config (e.g. a database backup) runs
+before any container changes. `j-cicd rollback <name>` (or `R` in the
+dashboard) reverts the last deploy by hand — images only, never the
+database — and is recorded in history as a `rollback` run. See [AGENT.md](AGENT.md) for the
 design and VPS setup. Not yet implemented: the stretch-goal
 failure-investigation agent.
 
@@ -203,12 +207,18 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd logs <run-id|name> [-f]` — a run's output (a name means its
   latest run); `-f` follows it until it finishes.
 - `j-cicd cancel <run-id|name>` — stop a run in progress.
+- `j-cicd rollback [name|project-dir] [--config path] [--quiet]` — revert
+  the last deploy on the VPS via `j-cicd-agent rollback` over ssh, using
+  the config's `deploy:` section. Recorded as a run of kind `rollback`.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
   `.cicd.yaml`.
 - `j-cicd version`
 - `j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>... [--config path]` — on
   the VPS: deploy, health-check, roll back on failure. Normally run by
   `j-cicd run` over ssh rather than by hand.
+- `j-cicd-agent rollback <project> [--config path]` — put the services the
+  last successful deploy changed back on their previous release (pull,
+  `pre_deploy`, up, health check). Running it again undoes it.
 - `j-cicd-agent status [project] [--config path]` — what's deployed, what it
   rolls back to, and how the last deploy went.
 - `j-cicd-agent version`

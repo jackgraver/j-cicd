@@ -84,7 +84,10 @@ containers or write its own health logic:
    variable (`BACKEND_IMAGE=repo@sha256:...`) set in the environment. Every
    other tracked service's variable is pinned to its recorded release too, so
    compose never falls back to the compose file's default tag. `--no-deps`
-   means a deploy never cycles postgres.
+   means a deploy never cycles postgres. Just before this, the project's
+   **`pre_deploy`** command runs (if set) — after the pull, so a release
+   that can't be pulled doesn't cost a backup, and before anything
+   changes, so a failed backup cancels the deploy with nothing touched.
 6. **Waits for healthy** using the compose healthchecks (`docker inspect`
    health status), bounded by `health_timeout`. `unhealthy`, `exited`,
    `dead` or `restarting` fail immediately; a service with no healthcheck is
@@ -95,6 +98,25 @@ containers or write its own health logic:
    there is no previous release (first deploy), it says so in capitals and
    exits non-zero — an agent that keeps trying to fix production unattended
    is worse than one that stops.
+
+## Manual rollback
+
+For a problem noticed after a deploy passed its health check:
+`j-cicd rollback <project>` on the build host (or `R` in the dashboard)
+runs `j-cicd-agent rollback <project>` over the same ssh path. The agent
+puts each service **the most recent successful deploy changed** back on
+the release it replaced (services that deploy didn't touch stay put),
+through the normal deploy sequence: pull, `pre_deploy` (so it's backed up
+too), up, health check, and an automatic return to the current release if
+the old one doesn't come up healthy. It's recorded in history as a run of
+kind `rollback`. Running it again undoes it, since the release rolled back
+from becomes the previous one; to go further back, deploy an older commit
+tag or digest with `j-cicd-agent deploy`.
+
+**Only images are rolled back, never the database.** If the release being
+replaced changed the schema, the older binary meets the newer schema. That
+is safe for purely additive changes (new tables, nullable columns) and not
+otherwise; the `pre_deploy` backup is the way back for the rest.
 
 Interrupting a deploy (Ctrl-C on the build host, or the run's timeout) still
 rolls back. A dropped SSH connection doesn't abandon a half-finished rollout:
@@ -111,6 +133,7 @@ One JSON file per project, `<state_dir>/<project>.json`, written atomically:
       "repository": "ghcr.io/jackgraver/st-backend",
       "current": "ghcr.io/jackgraver/st-backend@sha256:c40f...",
       "current_tag": "7fc0b4b12345",
+      "current_since": "2026-11-15T22:57:19Z",
       "previous": "ghcr.io/jackgraver/st-backend@sha256:9a1f...",
       "previous_tag": "51d2a0e9c3f7",
       "last_attempt": "ghcr.io/jackgraver/st-backend:7fc0b4b12345",
@@ -122,7 +145,9 @@ One JSON file per project, `<state_dir>/<project>.json`, written atomically:
 ```
 
 `current` is the last release that passed its health check: what should be
-running, and the next rollback target. `j-cicd-agent status` prints this,
+running, and the next rollback target. `current_since` is when it was
+deployed: the services sharing the latest one are what a manual rollback
+reverts. `j-cicd-agent status` prints this,
 showing each release as its commit tag plus a short digest.
 
 ## Setup
@@ -152,6 +177,8 @@ showing each release as its commit tag plus a short digest.
        env_file: /opt/simple-track/.env   # optional, passed as --env-file
        health_timeout: 90s            # default 90s; ~ start_period + interval × retries + slack
        timeout: 15m                   # default 15m; bounds pull + up + health wait
+       pre_deploy: /usr/local/bin/backup-db  # optional; sh -c from the compose dir, before
+                                      # containers change; non-zero exit cancels the deploy
        services:
          - name: backend              # compose service name
            image_var: BACKEND_IMAGE   # variable the compose file interpolates
@@ -187,13 +214,15 @@ commit before running — or pass `--deploy-dirty`.
 
 ## Not done yet
 
-- **Migrations.** Still the open question: does the agent run
-  `cmd/migration` before starting the new backend, or does the backend
-  self-migrate on boot? It decides whether rollback is even safe — a
-  rolled-back binary may face a migrated schema.
+- **Migrations.** The agent doesn't run them; simple-track's backend
+  migrates itself on boot, and its `/health` only answers once that's done
+  and Postgres is reachable. Rollback stays image-only (see Manual
+  rollback), with the `pre_deploy` backup as the way back for schema
+  changes. Reversible (up/down) migrations would be the project's to
+  provide.
 - **Restricting the SSH key.** Today the deploy key is a normal login. A
   `command="..."` forced command in `authorized_keys` that only allows
-  `j-cicd-agent deploy` would limit a stolen build-host key to "deploy a
+  `j-cicd-agent deploy`/`rollback` would limit a stolen build-host key to "deploy a
   digest of a configured repository". The agent's strict argument validation
   is the groundwork for that.
 - **vpsm event reporting**, so deploys appear on the same timeline as the
