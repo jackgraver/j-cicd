@@ -12,6 +12,12 @@ A self-hosted CI/CD pipeline tool written in Go. One binary on the build host, o
   interactive dashboard (`j-cicd`)
 - Deploy: hands the pushed digests to `j-cicd-agent` on the VPS over SSH, which rolls them out with docker compose, health-checks them, and rolls back on failure
 
+Install (needs Go and Docker, e.g. `sudo dnf install golang docker-cli`):
+
+```sh
+GOBIN=~/.local/bin go install ./cmd/...   # from a checkout; re-run after pulling
+```
+
 ```sh
 j-cicd add ~/code/my-app      # register (needs a .cicd.yaml; see j-cicd init)
 j-cicd run my-app             # run it from anywhere

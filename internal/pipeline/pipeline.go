@@ -54,6 +54,9 @@ type Pipeline struct {
 	deployDirty bool
 	runner      CommandRunner
 	log         *log.Logger
+	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
+	// it; the real one probes the local socket.
+	inspectDocker func() dockerDiagnosis
 }
 
 // New returns a Pipeline that runs commands against projectDir.
@@ -66,6 +69,8 @@ func New(projectDir string, opts Options) *Pipeline {
 		deployDirty: opts.DeployDirty,
 		runner:      opts.Runner,
 		log:         opts.Logger,
+
+		inspectDocker: inspectDockerHost,
 	}
 	if p.runner == nil {
 		p.runner = ExecRunner{}
@@ -93,6 +98,15 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 			return fmt.Errorf("cannot deploy this build: %w", err)
 		}
 		deployRefs = refs
+	}
+
+	if len(cfg.Images) > 0 {
+		// Before the steps, not at the first docker build: a daemon that
+		// isn't reachable should fail the run in a second, with the
+		// reason as the run's error, not after a full build and test.
+		if err := p.checkDocker(ctx); err != nil {
+			return err
+		}
 	}
 
 	for i := range cfg.Steps {

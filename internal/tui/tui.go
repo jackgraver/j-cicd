@@ -541,10 +541,44 @@ func (m *model) runDetail(w int) []string {
 	head := statusStyle(r.Status).Render(fmt.Sprintf("%s %s", display.Symbol(r.Status), r.Status)) +
 		styleDim.Render(truncate(fmt.Sprintf("  %s · %s", r.ID, r.StartedAt.Local().Format("Mon Jan 2 15:04:05")), w))
 	out := []string{"", head}
-	if r.Error != "" {
-		out = append(out, styleErr.Render(truncate(display.FirstLine(r.Error), w)))
+	// Errors say what to do about them (e.g. Docker's "Fix: ..."), so
+	// they get a few lines rather than being cut at the pane's edge.
+	for _, line := range wrap(display.FirstLine(r.Error), w, maxErrorLines) {
+		out = append(out, styleErr.Render(line))
 	}
 	return out
+}
+
+const maxErrorLines = 4
+
+// wrap breaks s into lines of at most w columns at spaces, keeping at
+// most n lines and marking anything cut with "…".
+func wrap(s string, w, n int) []string {
+	if s == "" || w <= 0 || n <= 0 {
+		return nil
+	}
+	var lines []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		switch {
+		case line == "":
+			line = word
+		case lipgloss.Width(line)+1+lipgloss.Width(word) <= w:
+			line += " " + word
+		default:
+			lines = append(lines, line)
+			line = word
+		}
+	}
+	lines = append(lines, line)
+	if len(lines) > n {
+		lines = lines[:n]
+		lines[n-1] += " …"
+	}
+	for i := range lines {
+		lines[i] = truncate(lines[i], w)
+	}
+	return lines
 }
 
 // scrollStart returns the first visible row so cursor stays on screen.

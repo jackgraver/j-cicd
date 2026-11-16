@@ -114,6 +114,18 @@ container to a commit. A tree with uncommitted changes is tagged
 `<rev>-dirty`, since j-cicd builds what's on disk rather than what's
 committed. Declaring `tags:` explicitly overrides all of this.
 
+**Docker check.** A run with any `images:` first runs `docker version`,
+before any step, so an unusable Docker fails the run in a second with a
+one-line reason and fix as the run's error (shown in `history` and the
+dashboard), not as a failed `docker build` after the steps. On failure it
+probes the local socket to say which problem it is: CLI not installed,
+daemon not running, user not in the socket's group, or in the group but
+the session predates it (needs a reboot). A daemon that's simply stopped
+is started with `systemctl start --no-ask-password docker` (Linux only);
+when that needs a password, the error says to run
+`sudo systemctl enable --now docker`. Remote or non-default docker
+contexts get the generic message.
+
 **Timeouts.** Each step and each docker command runs under a deadline:
 `timeout:` on the step, else `timeout:` at the top level, else the runner's
 built-in default (`pipeline.DefaultTimeout`, 60m). `timeout: 0` means no
@@ -145,7 +157,9 @@ Plain Go, no other build tooling (Fedora is the primary dev machine; Go and
 Docker come from the system packages):
 
 - `go build -o bin/ ./cmd/...` — build `bin/j-cicd` and `bin/j-cicd-agent`.
-- `go install ./cmd/...` — put both on `PATH` (in `$(go env GOPATH)/bin`).
+- `GOBIN=~/.local/bin go install ./cmd/...` — install both onto `PATH`.
+  Plain `go install` puts them in `~/go/bin`, which isn't on `PATH` by
+  default on Fedora; `~/.local/bin` is. Re-run after pulling changes.
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/j-cicd-agent-linux-amd64 ./cmd/j-cicd-agent`
   — a static agent binary to copy to the VPS.
 - `gofmt -l . && go vet ./... && go test ./...` — the checks.
@@ -237,6 +251,8 @@ builds without pushing.
   failure, then builds/pushes each image.
   - `pipeline.go` — the orchestration state machine.
   - `docker.go` — assembles `docker build`/`docker push` invocations.
+  - `dockercheck.go` — the pre-run Docker check, diagnosis, and
+    auto-start; `dockercheck_unix.go` probes the socket and groups.
   - `deploy.go` — the deploy preconditions (per-commit tag, clean tree)
     and the `ssh ... j-cicd-agent deploy` invocation.
   - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
