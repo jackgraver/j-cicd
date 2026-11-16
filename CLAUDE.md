@@ -52,6 +52,7 @@ it against a second or third project just means writing another config.
 
 ```yaml
 name: my-project       # required
+branch: main           # optional release branch: build its latest commit, not the working tree
 timeout: 30m            # optional, default time limit per step/docker command
 steps:                 # optional list of shell commands, run in order
   - name: build
@@ -113,6 +114,22 @@ build leaves behind an immutable handle to roll back to or to map a running
 container to a commit. A tree with uncommitted changes is tagged
 `<rev>-dirty`, since j-cicd builds what's on disk rather than what's
 committed. Declaring `tags:` explicitly overrides all of this.
+
+**Release branch.** With `branch:` set, a run never builds the project
+directory as it is on disk. It resolves the local branch to its latest
+commit, checks that commit out as a detached `git worktree` at
+`<state root>/snapshots/<project>`, runs everything (steps, builds, push,
+deploy) there with the config *committed on that branch*, and removes the
+worktree afterwards. So the checked-out branch and uncommitted changes in
+the project dir never block a release and never leak into one; the
+revision is always the branch's clean commit, so deploys work without
+`--deploy-dirty`. Build-only runs (`--no-push`, `b` in the dashboard)
+build the branch too. A snapshot holds only what's committed — no
+`node_modules`, `.env` or build output — so the steps must install what
+they need. It's the local branch, so committing is enough; pushing to a
+remote isn't required. A missing branch, a project dir outside git, or a
+branch with no committed `.cicd.yaml` fails the run with a message saying
+which. Without `branch:`, the directory is built as before.
 
 **Docker check.** A run with any `images:` first runs `docker version`,
 before any step, so an unusable Docker fails the run in a second with a
@@ -213,6 +230,9 @@ Everything lives under one root: `$J_CICD_HOME`, else
 - `runs/<id>/run.json` + `runs/<id>/output.log` — one dir per run. IDs are
   `YYYYMMDD-HHMMSS-<hex>` (UTC), so they sort by start time. The newest 50
   finished runs per project are kept; older ones are pruned.
+- `snapshots/<project>/` — the release-branch checkout of a run in
+  progress (see **Release branch**); removed when the run ends, and
+  replaced if a killed run left one behind.
 - `locks/<project>.lock` — `flock`ed for the whole run, so only one run per
   project executes at a time, across every j-cicd process. The kernel
   releases it however the process dies.
@@ -270,6 +290,9 @@ builds without pushing.
   start, send all output to the run log (optionally echoed), record the
   outcome. Also `Launch` (detached background run) and `Cancel`.
   Every pipeline run, CLI or dashboard, goes through `manager.Run`.
+  `snapshot.go` resolves a release `branch:` and manages its worktree
+  checkout (plain `git` via `os/exec`, like `detect`: it's repository
+  plumbing, not a pipeline command, and its tests use real repos).
 - `internal/display/` — shared formatting of runs (status symbols, ages,
   durations) for the CLI tables and the dashboard.
 - `internal/tui/` — the Bubble Tea dashboard (`tui.go`) and its log viewer

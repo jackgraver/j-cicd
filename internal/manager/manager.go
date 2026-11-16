@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
@@ -101,6 +103,18 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 	// a deploy has something immutable to pin even though "latest" moves.
 	revision, hasRevision := detect.GitRevision(dir)
 
+	// A release branch means building that branch's commit rather than
+	// the directory, so the revision is the branch's, never "-dirty". A
+	// config that doesn't load is left for execute to record as such.
+	var rel *release
+	var relErr error
+	if cfg, err := config.Load(configPath, ""); err == nil && cfg.Branch != "" {
+		rel, relErr = resolveRelease(ctx, dir, cfg.Branch)
+		if relErr == nil {
+			revision, hasRevision = rel.revision, true
+		}
+	}
+
 	h, err := st.StartRun(store.Run{
 		Project:  t.Name,
 		Dir:      dir,
@@ -118,11 +132,14 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 	}
 	logger := log.New(out, "", log.LstdFlags)
 	logger.Printf("run %s of %q in %s", h.Run.ID, t.Name, dir)
-	if !hasRevision {
+	if !hasRevision && relErr == nil {
 		logger.Printf("no git revision for %s — images will only be tagged \"latest\"", dir)
 	}
 
-	runErr := execute(ctx, dir, configPath, revision, opts, out, logger)
+	runErr := relErr
+	if runErr == nil {
+		runErr = prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, out, logger)
+	}
 
 	status := store.StatusSuccess
 	switch {
@@ -146,11 +163,48 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 	return h.Run, runErr
 }
 
-func execute(ctx context.Context, dir, configPath, revision string, opts Options, out io.Writer, logger *log.Logger) error {
+// prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
+// fresh snapshot of the release commit that is removed afterwards.
+func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revision string, rel *release, opts Options, out io.Writer, logger *log.Logger) error {
+	if rel == nil {
+		cfg, err := config.Load(configPath, revision)
+		if err != nil {
+			return &ConfigError{Err: err}
+		}
+		return execute(ctx, dir, cfg, revision, opts, out, logger)
+	}
+
+	logger.Printf("building branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
+	snap, err := createSnapshot(ctx, root, project, dir, rel)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := snap.remove(); err != nil {
+			logger.Printf("warning: couldn't remove snapshot %s: %v", snap.dir, err)
+		}
+	}()
+	buildDir := filepath.Join(snap.dir, rel.prefix)
+
+	// The config is part of what's released, so it comes from the commit
+	// too, unless it lives outside the project (--config elsewhere).
+	if inside, err := filepath.Rel(dir, configPath); err == nil && inside != ".." && !strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+		configPath = filepath.Join(buildDir, inside)
+		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
+			return &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
+		}
+	}
 	cfg, err := config.Load(configPath, revision)
 	if err != nil {
 		return &ConfigError{Err: err}
 	}
+	if cfg.Branch != rel.branch {
+		logger.Printf("warning: the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
+	}
+	return execute(ctx, buildDir, cfg, revision, opts, out, logger)
+}
+
+func execute(ctx context.Context, dir string, cfg *config.Config, revision string, opts Options, out io.Writer, logger *log.Logger) error {
 	runner := opts.Runner
 	if runner == nil {
 		// One writer for both streams keeps stdout and stderr in the order

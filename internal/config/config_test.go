@@ -268,3 +268,14 @@ func TestLoadRejectsBadDeploy(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadBranch(t *testing.T) {
+	if cfg := loadOK(t, "name: app\nbranch: release/v2\nsteps:\n  - run: make\n", ""); cfg.Branch != "release/v2" {
+		t.Errorf("branch = %q", cfg.Branch)
+	}
+	for _, bad := range []string{"-main", "my branch"} {
+		if msg := loadErr(t, "name: app\nbranch: \""+bad+"\"\nsteps:\n  - run: make\n"); !strings.Contains(msg, "not a valid branch name") {
+			t.Errorf("branch %q: err = %q", bad, msg)
+		}
+	}
+}
