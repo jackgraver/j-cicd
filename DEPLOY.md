@@ -190,9 +190,10 @@ verified serving and booting:
 
 ## What j-cicd does not do yet
 
-- **No clone / commit pinning.** Builds the directory you point it at. The
-  worktree dance above is a workaround; `j-cicd run --ref <commit>` would
-  remove the footgun.
+- ~~**No clone / commit pinning.**~~ Done: set `branch: main` in
+  `.cicd.yaml` and every run builds a clean checkout of that branch's
+  latest commit, whatever is checked out or uncommitted in the project
+  dir. The manual worktree dance above is no longer needed.
 
 Since this was written, a `deploy:` section in `.cicd.yaml` makes the run
 finish by deploying the per-commit tags it just pushed on the VPS through

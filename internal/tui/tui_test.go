@@ -164,3 +164,17 @@ func TestReadLogTailTrimsToLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestWrap(t *testing.T) {
+	got := wrap("Docker isn't usable: permission denied. Fix: reboot", 20, 4)
+	want := []string{"Docker isn't usable:", "permission denied.", "Fix: reboot"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("wrap = %q, want %q", got, want)
+	}
+	if got := wrap("a b c d e f", 1, 2); len(got) != 2 {
+		t.Errorf("wrap kept %d lines, want 2: %q", len(got), got)
+	}
+	if got := wrap("", 10, 3); got != nil {
+		t.Errorf("wrap of empty = %q", got)
+	}
+}

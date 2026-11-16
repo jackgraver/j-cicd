@@ -52,6 +52,7 @@ it against a second or third project just means writing another config.
 
 ```yaml
 name: my-project       # required
+branch: main           # optional release branch: build its latest commit, not the working tree
 timeout: 30m            # optional, default time limit per step/docker command
 steps:                 # optional list of shell commands, run in order
   - name: build
@@ -114,6 +115,34 @@ container to a commit. A tree with uncommitted changes is tagged
 `<rev>-dirty`, since j-cicd builds what's on disk rather than what's
 committed. Declaring `tags:` explicitly overrides all of this.
 
+**Release branch.** With `branch:` set, a run never builds the project
+directory as it is on disk. It resolves the local branch to its latest
+commit, checks that commit out as a detached `git worktree` at
+`<state root>/snapshots/<project>`, runs everything (steps, builds, push,
+deploy) there with the config *committed on that branch*, and removes the
+worktree afterwards. So the checked-out branch and uncommitted changes in
+the project dir never block a release and never leak into one; the
+revision is always the branch's clean commit, so deploys work without
+`--deploy-dirty`. Build-only runs (`--no-push`, `b` in the dashboard)
+build the branch too. A snapshot holds only what's committed — no
+`node_modules`, `.env` or build output — so the steps must install what
+they need. It's the local branch, so committing is enough; pushing to a
+remote isn't required. A missing branch, a project dir outside git, or a
+branch with no committed `.cicd.yaml` fails the run with a message saying
+which. Without `branch:`, the directory is built as before.
+
+**Docker check.** A run with any `images:` first runs `docker version`,
+before any step, so an unusable Docker fails the run in a second with a
+one-line reason and fix as the run's error (shown in `history` and the
+dashboard), not as a failed `docker build` after the steps. On failure it
+probes the local socket to say which problem it is: CLI not installed,
+daemon not running, user not in the socket's group, or in the group but
+the session predates it (needs a reboot). A daemon that's simply stopped
+is started with `systemctl start --no-ask-password docker` (Linux only);
+when that needs a password, the error says to run
+`sudo systemctl enable --now docker`. Remote or non-default docker
+contexts get the generic message.
+
 **Timeouts.** Each step and each docker command runs under a deadline:
 `timeout:` on the step, else `timeout:` at the top level, else the runner's
 built-in default (`pipeline.DefaultTimeout`, 60m). `timeout: 0` means no
@@ -145,7 +174,9 @@ Plain Go, no other build tooling (Fedora is the primary dev machine; Go and
 Docker come from the system packages):
 
 - `go build -o bin/ ./cmd/...` — build `bin/j-cicd` and `bin/j-cicd-agent`.
-- `go install ./cmd/...` — put both on `PATH` (in `$(go env GOPATH)/bin`).
+- `GOBIN=~/.local/bin go install ./cmd/...` — install both onto `PATH`.
+  Plain `go install` puts them in `~/go/bin`, which isn't on `PATH` by
+  default on Fedora; `~/.local/bin` is. Re-run after pulling changes.
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/j-cicd-agent-linux-amd64 ./cmd/j-cicd-agent`
   — a static agent binary to copy to the VPS.
 - `gofmt -l . && go vet ./... && go test ./...` — the checks.
@@ -199,6 +230,9 @@ Everything lives under one root: `$J_CICD_HOME`, else
 - `runs/<id>/run.json` + `runs/<id>/output.log` — one dir per run. IDs are
   `YYYYMMDD-HHMMSS-<hex>` (UTC), so they sort by start time. The newest 50
   finished runs per project are kept; older ones are pruned.
+- `snapshots/<project>/` — the release-branch checkout of a run in
+  progress (see **Release branch**); removed when the run ends, and
+  replaced if a killed run left one behind.
 - `locks/<project>.lock` — `flock`ed for the whole run, so only one run per
   project executes at a time, across every j-cicd process. The kernel
   releases it however the process dies.
@@ -237,6 +271,8 @@ builds without pushing.
   failure, then builds/pushes each image.
   - `pipeline.go` — the orchestration state machine.
   - `docker.go` — assembles `docker build`/`docker push` invocations.
+  - `dockercheck.go` — the pre-run Docker check, diagnosis, and
+    auto-start; `dockercheck_unix.go` probes the socket and groups.
   - `deploy.go` — the deploy preconditions (per-commit tag, clean tree)
     and the `ssh ... j-cicd-agent deploy` invocation.
   - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
@@ -254,6 +290,9 @@ builds without pushing.
   start, send all output to the run log (optionally echoed), record the
   outcome. Also `Launch` (detached background run) and `Cancel`.
   Every pipeline run, CLI or dashboard, goes through `manager.Run`.
+  `snapshot.go` resolves a release `branch:` and manages its worktree
+  checkout (plain `git` via `os/exec`, like `detect`: it's repository
+  plumbing, not a pipeline command, and its tests use real repos).
 - `internal/display/` — shared formatting of runs (status symbols, ages,
   durations) for the CLI tables and the dashboard.
 - `internal/tui/` — the Bubble Tea dashboard (`tui.go`) and its log viewer

@@ -78,6 +78,7 @@ func TestRunStepsInOrderThenImages(t *testing.T) {
 	}
 
 	want := []string{
+		dockerCheck,
 		"sh -c make build",
 		"sh -c make test",
 		"docker build -f /proj/Dockerfile -t example.com/demo:latest /proj",
@@ -106,7 +107,7 @@ func TestRunStopsAtFirstFailedStep(t *testing.T) {
 		t.Errorf("error = %v, want it to name the failing step", err)
 	}
 	// Nothing after the failure may run — especially not a push.
-	assertCalls(t, runner.calls, []string{"sh -c make build", "sh -c make test"})
+	assertCalls(t, runner.calls, []string{dockerCheck, "sh -c make build", "sh -c make test"})
 }
 
 func TestRunNoPushBuildsButDoesNotPush(t *testing.T) {
@@ -125,6 +126,7 @@ func TestRunNoPushBuildsButDoesNotPush(t *testing.T) {
 		}
 	}
 	assertCalls(t, runner.calls, []string{
+		dockerCheck,
 		"docker build -f /proj/Dockerfile -t example.com/demo:latest -t example.com/demo:abc123 /proj",
 	})
 }
@@ -143,6 +145,7 @@ func TestRunPushesEveryTagOfEveryImage(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	assertCalls(t, runner.calls, []string{
+		dockerCheck,
 		"docker build -f /proj/backend/Dockerfile -t example.com/be:latest -t example.com/be:abc123 /proj/backend",
 		"docker push example.com/be:latest",
 		"docker push example.com/be:abc123",

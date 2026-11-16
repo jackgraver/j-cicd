@@ -25,6 +25,11 @@ const DefaultFile = ".cicd.yaml"
 // specific to any particular project.
 type Config struct {
 	Name string `yaml:"name"`
+	// Branch, when set, is the release branch: every run builds a clean
+	// checkout of that branch's latest commit instead of the project
+	// directory as it is on disk, so uncommitted work and whatever branch
+	// happens to be checked out can never reach a registry or the VPS.
+	Branch string `yaml:"branch,omitempty"`
 	// Timeout is the default time limit for each individual step and
 	// docker command. Unset means the runner's built-in default; an
 	// explicit 0 means no limit.
@@ -138,6 +143,11 @@ func Load(path, revision string) (*Config, error) {
 func (c *Config) applyDefaults(revision string) error {
 	if c.Name == "" {
 		return errors.New("name is required")
+	}
+	// git would read a leading dash as an option, and a space can't be in
+	// a branch name; anything subtler is git's to reject when resolving it.
+	if c.Branch != "" && (strings.HasPrefix(c.Branch, "-") || strings.ContainsAny(c.Branch, " \t\n")) {
+		return fmt.Errorf("branch %q is not a valid branch name", c.Branch)
 	}
 	if len(c.Steps) == 0 && len(c.Images) == 0 {
 		return errors.New("must define at least one step or image")
