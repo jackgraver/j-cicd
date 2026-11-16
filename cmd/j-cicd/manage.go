@@ -287,6 +287,9 @@ func cmdUI(args []string) error {
 			}
 			return manager.Launch(st, exe, append(args, project)...)
 		},
+		Rollback: func(project string) error {
+			return manager.Launch(st, exe, "rollback", "--quiet", project)
+		},
 	})
 }
 

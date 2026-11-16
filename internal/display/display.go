@@ -58,8 +58,12 @@ func Duration(d time.Duration) string {
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
-// Mode describes whether a run pushed its images.
+// Mode describes what a run did: rolled back, or built with or without
+// pushing its images.
 func Mode(r store.Run) string {
+	if r.Kind == store.KindRollback {
+		return "rollback"
+	}
 	if r.Push {
 		return "push"
 	}

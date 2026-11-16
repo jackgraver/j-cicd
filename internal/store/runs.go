@@ -34,12 +34,18 @@ func (s Status) Done() bool { return s != StatusRunning }
 // can't be allowed to grow without bound.
 const DefaultKeepRuns = 50
 
+// KindRollback marks a run that reverted the project's last deploy
+// instead of running its pipeline.
+const KindRollback = "rollback"
+
 // Run is one recorded pipeline run.
 type Run struct {
 	ID      string `json:"id"`
 	Project string `json:"project"`
-	Dir     string `json:"dir"`
-	Config  string `json:"config"`
+	// Kind is "" for a pipeline run, or KindRollback.
+	Kind   string `json:"kind,omitempty"`
+	Dir    string `json:"dir"`
+	Config string `json:"config"`
 	// Revision is the git revision the run built ("" if not a git tree).
 	Revision   string    `json:"revision,omitempty"`
 	Push       bool      `json:"push"`

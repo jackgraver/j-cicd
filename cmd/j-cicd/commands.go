@@ -38,6 +38,7 @@ Usage:
   j-cicd history [name]        list recorded runs, newest first
   j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
   j-cicd cancel <run-id|name>  stop a run in progress
+  j-cicd rollback [name|dir]   revert the last deploy on the VPS (images only, not the database)
 
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
   j-cicd version               print the j-cicd version
@@ -86,6 +87,13 @@ func parseRunArgs(args []string) (runArgs, error) {
 	}
 
 	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty}
+	parsed.defaultPaths()
+	return parsed, nil
+}
+
+// defaultPaths fills in the project dir and config path when they weren't
+// given.
+func (parsed *runArgs) defaultPaths() {
 	if parsed.projectDir == "" {
 		// A --config with no project dir means "run that project": its
 		// steps, step dirs, dockerfiles and build contexts all resolve
@@ -100,7 +108,6 @@ func parseRunArgs(args []string) (runArgs, error) {
 	if parsed.configPath == "" {
 		parsed.configPath = filepath.Join(parsed.projectDir, config.DefaultFile)
 	}
-	return parsed, nil
 }
 
 func cmdRun(args []string) error {
@@ -132,6 +139,48 @@ func cmdRun(args []string) error {
 		opts.Echo = os.Stderr
 	}
 	run, err := manager.Run(ctx, st, target, opts)
+	return reportRun(run, err, "pipeline failed")
+}
+
+func cmdRollback(args []string) error {
+	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
+	quiet := fs.Bool("quiet", false, "don't echo the rollback's output (it's still recorded; see j-cicd logs)")
+	dir, err := parseCommandFlags(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return usageError(err)
+	}
+	parsed := runArgs{projectDir: dir, configPath: *configPath}
+	parsed.defaultPaths()
+
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return err
+	}
+
+	// Ctrl-C cancels it like a run; the agent then puts back what was
+	// running before the rollback started.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	opts := manager.Options{}
+	if !*quiet {
+		opts.Echo = os.Stderr
+	}
+	run, err := manager.Rollback(ctx, st, target, opts)
+	return reportRun(run, err, "rollback failed")
+}
+
+// reportRun logs how a recorded run ended and maps its error to an exit
+// code.
+func reportRun(run store.Run, err error, failed string) error {
 	if run.ID != "" && run.Status.Done() {
 		log.Printf("run %s %s after %s (output: j-cicd logs %s)", run.ID, run.Status, display.Duration(run.Duration()), run.ID)
 	}
@@ -142,7 +191,7 @@ func cmdRun(args []string) error {
 		if errors.Is(err, manager.ErrBusy) {
 			return err
 		}
-		return fmt.Errorf("pipeline failed: %w", err)
+		return fmt.Errorf("%s: %w", failed, err)
 	}
 	return nil
 }

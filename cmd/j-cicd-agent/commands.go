@@ -29,6 +29,7 @@ func printUsage() {
 Usage:
   j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>...
                                                        deploy, health-check, roll back on failure
+  j-cicd-agent rollback <project>                      revert the last deploy (images only, not the database)
   j-cicd-agent status [project]                        show what is deployed and what it rolls back to
   j-cicd-agent version                                 print the version
 
@@ -83,14 +84,7 @@ func cmdDeploy(args []string) error {
 		return err
 	}
 
-	// The build host's ssh session can drop mid-deploy (network blip,
-	// its own timeout). Losing the terminal must not abandon a
-	// half-finished rollout: ignore SIGHUP, and SIGPIPE so writing
-	// progress to a closed connection doesn't kill the process before
-	// it can finish or roll back. Ctrl-C / SIGTERM still cancel, and
-	// cancellation itself triggers the rollback.
-	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := deployContext()
 	defer stop()
 
 	a := agent.New(cfg, agent.Options{})
@@ -98,6 +92,39 @@ func cmdDeploy(args []string) error {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 	return nil
+}
+
+func cmdRollback(args []string) error {
+	positional, configPath, err := parseArgs("rollback", "<project>", args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return usageError(errors.New("rollback needs exactly one project"))
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	ctx, stop := deployContext()
+	defer stop()
+
+	a := agent.New(cfg, agent.Options{})
+	if err := a.Rollback(ctx, positional[0]); err != nil {
+		return fmt.Errorf("rollback failed: %w", err)
+	}
+	return nil
+}
+
+// deployContext is the context for anything that changes what's running.
+// The build host's ssh session can drop mid-deploy (network blip, its own
+// timeout). Losing the terminal must not abandon a half-finished rollout:
+// ignore SIGHUP, and SIGPIPE so writing progress to a closed connection
+// doesn't kill the process before it can finish or roll back. Ctrl-C /
+// SIGTERM still cancel, and cancellation itself triggers the rollback.
+func deployContext() (context.Context, context.CancelFunc) {
+	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 func cmdStatus(args []string) error {

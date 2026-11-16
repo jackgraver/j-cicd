@@ -53,8 +53,16 @@ type Project struct {
 	HealthTimeout *config.Duration `yaml:"health_timeout,omitempty"`
 	// Timeout bounds a whole deploy (pull, up, health wait). A rollback
 	// gets a fresh budget of the same size.
-	Timeout  *config.Duration `yaml:"timeout,omitempty"`
-	Services []Service        `yaml:"services"`
+	Timeout *config.Duration `yaml:"timeout,omitempty"`
+	// PreDeploy is a shell command run (sh -c, from the compose file's
+	// directory) once the new images are pulled and before any container
+	// is touched — e.g. a database backup. If it fails the deploy stops
+	// with nothing changed. It runs for manual rollbacks too, but not for
+	// the automatic rollback after a failed deploy (it already ran).
+	// J_CICD_PROJECT, J_CICD_SERVICES (space-separated) and J_CICD_RELEASE
+	// (e.g. "backend=7fc0b4b12345") describe what is about to change.
+	PreDeploy string    `yaml:"pre_deploy,omitempty"`
+	Services  []Service `yaml:"services"`
 }
 
 // Service ties a pushed repository to the compose service that runs it.

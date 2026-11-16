@@ -43,6 +43,8 @@ func appStart(args []string) int {
 	switch args[0] {
 	case "deploy":
 		err = cmdDeploy(args[1:])
+	case "rollback":
+		err = cmdRollback(args[1:])
 	case "status":
 		err = cmdStatus(args[1:])
 	case "version":
