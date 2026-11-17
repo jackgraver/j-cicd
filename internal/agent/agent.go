@@ -286,6 +286,12 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 		a.recordUntouched(proj, st, changed, resultPreDeployFailed)
 		return fmt.Errorf("pre_deploy failed: %w (nothing was changed)", err)
 	}
+	// After the backup, so a migration that goes wrong has one to go back
+	// to; before the swap, so the new release starts on a ready database.
+	if err := a.preSwap(dctx, newProj, st, changed); err != nil {
+		a.recordUntouched(proj, st, changed, resultPreSwapFailed)
+		return fmt.Errorf("pre_swap failed: %w (nothing was changed)", err)
+	}
 
 	a.log.Printf("deploying %s", describe(changed))
 	deployErr := a.start(dctx, newProj, st, changed)

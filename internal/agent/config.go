@@ -61,8 +61,11 @@ type Project struct {
 	// the automatic rollback after a failed deploy (it already ran).
 	// J_CICD_PROJECT, J_CICD_SERVICES (space-separated) and J_CICD_RELEASE
 	// (e.g. "backend=7fc0b4b12345") describe what is about to change.
-	PreDeploy string    `yaml:"pre_deploy,omitempty"`
-	Services  []Service `yaml:"services"`
+	PreDeploy string `yaml:"pre_deploy,omitempty"`
+	// PreSwap runs a command in one service's new image after pre_deploy
+	// and before any container changes (e.g. database migrations).
+	PreSwap  *PreSwap  `yaml:"pre_swap,omitempty"`
+	Services []Service `yaml:"services"`
 
 	// inUse, when set, is a compose file from a release (sent by the build
 	// host) to run instead of ComposeFile. ComposeFile's directory stays
@@ -159,6 +162,9 @@ func (p *Project) validate() error {
 			return fmt.Errorf("repository %s is mapped to two services", s.Repository)
 		}
 		names[s.Name], vars[s.ImageVar], repos[s.Repository] = true, true, true
+	}
+	if p.PreSwap != nil {
+		return p.PreSwap.validate(p)
 	}
 	return nil
 }

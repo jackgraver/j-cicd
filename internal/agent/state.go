@@ -20,6 +20,7 @@ const (
 	resultNoRollback      = "failed, no previous release to roll back to"
 	resultUntouched       = "failed to pull, nothing changed"
 	resultPreDeployFailed = "pre_deploy failed, nothing changed"
+	resultPreSwapFailed   = "pre_swap failed, nothing changed"
 )
 
 // State is what the agent remembers about one project between deploys:
