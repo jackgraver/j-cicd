@@ -63,6 +63,12 @@ type Project struct {
 	// (e.g. "backend=7fc0b4b12345") describe what is about to change.
 	PreDeploy string    `yaml:"pre_deploy,omitempty"`
 	Services  []Service `yaml:"services"`
+
+	// inUse, when set, is a compose file from a release (sent by the build
+	// host) to run instead of ComposeFile. ComposeFile's directory stays
+	// the project directory either way, so the compose project name and
+	// relative paths don't change. See Agent.withCompose.
+	inUse string
 }
 
 // Service ties a pushed repository to the compose service that runs it.

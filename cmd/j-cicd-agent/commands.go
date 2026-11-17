@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,7 +42,12 @@ Config: --config, else $`+configEnv+`, else `+agent.DefaultConfigFile+`.
 // subcommand that only takes --config, and returns the positionals and
 // the config path.
 func parseArgs(name, usage string, args []string) ([]string, string, error) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	return parseArgsWith(flag.NewFlagSet(name, flag.ContinueOnError), name, usage, args)
+}
+
+// parseArgsWith is parseArgs for a subcommand with flags of its own,
+// already defined on fs.
+func parseArgsWith(fs *flag.FlagSet, name, usage string, args []string) ([]string, string, error) {
 	configPath := fs.String("config", "", "agent config (default: $"+configEnv+", else "+agent.DefaultConfigFile+")")
 	positional, err := cli.ParseInterleaved(fs, args)
 	if err != nil {
@@ -71,13 +77,28 @@ func loadConfig(path string) (*agent.Config, error) {
 	return cfg, nil
 }
 
+// maxCompose bounds a compose file sent with a deploy. It arrives inside
+// the ssh command line, which the kernel caps at 128 KiB per argument.
+const maxCompose = 64 << 10
+
 func cmdDeploy(args []string) error {
-	positional, configPath, err := parseArgs("deploy", "<project> <repo:tag|repo@sha256:...>...", args)
+	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	composeB64 := fs.String("compose-b64", "", "the release's compose file, base64-encoded (sent by j-cicd run)")
+	positional, configPath, err := parseArgsWith(fs, "deploy", "<project> <repo:tag|repo@sha256:...>...", args)
 	if err != nil {
 		return err
 	}
 	if len(positional) < 2 {
 		return usageError(errors.New("deploy needs a project and at least one repo:tag or repo@sha256:... reference"))
+	}
+	var compose []byte
+	if *composeB64 != "" {
+		if compose, err = base64.StdEncoding.DecodeString(*composeB64); err != nil {
+			return usageError(fmt.Errorf("--compose-b64: %w", err))
+		}
+		if len(compose) == 0 || len(compose) > maxCompose {
+			return usageError(fmt.Errorf("--compose-b64: compose file must be 1 byte to %d KiB, got %d bytes", maxCompose>>10, len(compose)))
+		}
 	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -88,7 +109,7 @@ func cmdDeploy(args []string) error {
 	defer stop()
 
 	a := agent.New(cfg, agent.Options{})
-	if err := a.Deploy(ctx, positional[0], positional[1:]); err != nil {
+	if err := a.Deploy(ctx, positional[0], positional[1:], compose); err != nil {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 	return nil
@@ -173,8 +194,19 @@ func cmdStatus(args []string) error {
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, name, release(ss.CurrentTag, ss.Current), release(ss.PreviousTag, ss.Previous), last, orDash(ss.LastResult))
 		}
+		if c := st.Compose; c != nil {
+			fmt.Fprintf(w, "%s\t(compose file)\t%s\t%s\t%s\t\n", p.Name, composeLabel(c.Current), composeLabel(c.Previous), c.CurrentSince.Format("2006-01-02 15:04:05Z"))
+		}
 	}
 	return w.Flush()
+}
+
+// composeLabel names a release's compose file by a short content hash.
+func composeLabel(hash string) string {
+	if hash == "" {
+		return "configured"
+	}
+	return "sha256:" + hash[:min(12, len(hash))]
 }
 
 // release shows a recorded release as its tag (the commit, normally)

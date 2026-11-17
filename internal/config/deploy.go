@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -36,6 +37,12 @@ type Deploy struct {
 	// Timeout bounds the whole remote deploy, including the agent's
 	// health wait and any rollback. Falls back to the top-level timeout.
 	Timeout *Duration `yaml:"timeout,omitempty"`
+	// ComposeFile, relative to the project dir, is sent to the agent with
+	// every deploy, from the same commit as the images, so the deploy
+	// host runs the compose file that goes with the release (and a
+	// rollback restores the one that went with the previous release).
+	// Unset, the agent uses the compose file named in its own config.
+	ComposeFile string `yaml:"compose_file,omitempty"`
 }
 
 // projectName is deliberately narrow: the agent uses it as a file name for
@@ -67,6 +74,15 @@ func (d *Deploy) applyDefaults(c *Config) error {
 	}
 	if len(c.Images) == 0 {
 		return errors.New("there are no images: to deploy")
+	}
+	if d.ComposeFile != "" {
+		// It's part of the release, so it has to come from the tree
+		// being built, not from wherever this host keeps things.
+		clean := filepath.Clean(d.ComposeFile)
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("compose_file %q must be a path inside the project", d.ComposeFile)
+		}
+		d.ComposeFile = clean
 	}
 
 	if len(d.Images) == 0 {

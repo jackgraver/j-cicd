@@ -28,11 +28,11 @@ func (f *fakeDocker) preDeployCalls() []string {
 func TestPreDeployRunsAfterPullBeforeUp(t *testing.T) {
 	cfg, docker := withPreDeploy(t, "backup.sh"), &fakeDocker{}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1, feV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1, feV1}, nil); err != nil {
 		t.Fatal(err)
 	}
 	docker.calls = nil
-	if err := a.Deploy(context.Background(), "st", []string{beV2, feV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV2, feV1}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,12 +52,12 @@ func TestPreDeployRunsAfterPullBeforeUp(t *testing.T) {
 func TestFailedPreDeployChangesNothing(t *testing.T) {
 	cfg, docker := withPreDeploy(t, "backup.sh"), &fakeDocker{}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatal(err)
 	}
 	docker.calls, docker.failOn = nil, "sh -c backup.sh"
 
-	err := a.Deploy(context.Background(), "st", []string{beV2})
+	err := a.Deploy(context.Background(), "st", []string{beV2}, nil)
 	if err == nil || !strings.Contains(err.Error(), "pre_deploy failed") || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("err = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestPreDeploySkippedWhenNothingChanges(t *testing.T) {
 	cfg, docker := withPreDeploy(t, "backup.sh"), &fakeDocker{}
 	a := testAgent(cfg, docker)
 	for range 2 {
-		if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+		if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestRollbackRevertsOnlyTheLastDeploy(t *testing.T) {
 	cfg, docker := withPreDeploy(t, "backup.sh"), &fakeDocker{}
 	a := testAgent(cfg, docker)
 	for _, refs := range [][]string{{beV1, feV1}, {beV2, feV1}} {
-		if err := a.Deploy(context.Background(), "st", refs); err != nil {
+		if err := a.Deploy(context.Background(), "st", refs, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -126,7 +126,7 @@ func TestRollbackToUnhealthyReleaseReturnsToCurrent(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
 	a := testAgent(cfg, docker)
 	for _, ref := range []string{beV1, beV2} {
-		if err := a.Deploy(context.Background(), "st", []string{ref}); err != nil {
+		if err := a.Deploy(context.Background(), "st", []string{ref}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestRollbackNeedsAPreviousRelease(t *testing.T) {
 	if err := a.Rollback(context.Background(), "st"); err == nil || !strings.Contains(err.Error(), "never been deployed") {
 		t.Errorf("never deployed: err = %v", err)
 	}
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Rollback(context.Background(), "st"); err == nil || !strings.Contains(err.Error(), "first deploy") {
@@ -168,7 +168,7 @@ func TestRollbackOfStateWithoutCurrentSince(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
 	a := testAgent(cfg, docker)
 	for _, refs := range [][]string{{beV1, feV1}, {beV2}} {
-		if err := a.Deploy(context.Background(), "st", refs); err != nil {
+		if err := a.Deploy(context.Background(), "st", refs, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

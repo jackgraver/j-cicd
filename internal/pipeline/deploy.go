@@ -2,8 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -27,6 +30,11 @@ func (p *Pipeline) deployRefs(cfg *config.Config) ([]string, error) {
 	if strings.HasSuffix(p.revision, "-dirty") && !p.deployDirty {
 		return nil, fmt.Errorf("the tree has uncommitted changes (revision %s); commit them, or pass --deploy-dirty to deploy them anyway", p.revision)
 	}
+	if f := cfg.Deploy.ComposeFile; f != "" {
+		if _, err := os.Stat(filepath.Join(p.projectDir, f)); err != nil {
+			return nil, fmt.Errorf("deploy.compose_file: %w", err)
+		}
+	}
 	var refs []string
 	for _, img := range cfg.DeployImages() {
 		if !slices.Contains(img.Tags, p.revision) {
@@ -46,9 +54,29 @@ func (p *Pipeline) deployRefs(cfg *config.Config) ([]string, error) {
 // rolled back) fails the pipeline.
 func (p *Pipeline) runDeploy(ctx context.Context, cfg *config.Config, refs []string) error {
 	args := sshArgs(cfg.Deploy, "deploy", refs...)
-	p.log.Printf("[deploy] ssh %s", strings.Join(args, " "))
+	shown := strings.Join(args, " ")
+	if f := cfg.Deploy.ComposeFile; f != "" {
+		data, err := os.ReadFile(filepath.Join(p.projectDir, f))
+		if err != nil {
+			return fmt.Errorf("reading deploy.compose_file: %w", err)
+		}
+		if len(data) > maxComposeFile {
+			return fmt.Errorf("deploy.compose_file %s is %d KiB; the most that fits in the ssh command is %d KiB", f, len(data)>>10, maxComposeFile>>10)
+		}
+		// It travels inside the ssh command line, so base64 keeps it one
+		// shell-safe word. The log gets a description, not the blob.
+		encoded := base64.StdEncoding.EncodeToString(data)
+		args[len(args)-1] += " --compose-b64 " + shellQuote(encoded)
+		shown += fmt.Sprintf(" --compose-b64 <%s, %d bytes>", f, len(data))
+	}
+	p.log.Printf("[deploy] ssh %s", shown)
 	return p.exec(ctx, cfg.DeployTimeout(DefaultTimeout), "", "ssh", args...)
 }
+
+// maxComposeFile matches the agent's limit on a compose file sent with a
+// deploy (the kernel caps one argument at 128 KiB, and base64 adds a
+// third).
+const maxComposeFile = 64 << 10
 
 // Rollback asks the agent on the deploy host to revert the project's last
 // deploy, over the same ssh path as a deploy. The agent decides what that
