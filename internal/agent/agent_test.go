@@ -122,7 +122,7 @@ func state(t *testing.T, cfg *Config) *State {
 
 func TestFirstDeployPullsStartsAndRecords(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
-	if err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1, feV1}); err != nil {
+	if err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1, feV1}, nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
@@ -146,11 +146,11 @@ func TestFirstDeployPullsStartsAndRecords(t *testing.T) {
 func TestDeployPinsUntouchedServices(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1, feV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1, feV1}, nil); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
 	docker.calls = nil
-	if err := a.Deploy(context.Background(), "st", []string{beV2}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV2}, nil); err != nil {
 		t.Fatalf("second Deploy: %v", err)
 	}
 
@@ -169,11 +169,11 @@ func TestDeployPinsUntouchedServices(t *testing.T) {
 func TestDeploySameReleaseIsANoop(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	docker.calls = nil
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	if up := docker.composeCalls("up"); len(up) != 0 {
@@ -184,11 +184,11 @@ func TestDeploySameReleaseIsANoop(t *testing.T) {
 func TestUnhealthyReleaseRollsBack(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{health: map[string]string{beV2Digest: "running unhealthy"}}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
 
-	err := a.Deploy(context.Background(), "st", []string{beV2})
+	err := a.Deploy(context.Background(), "st", []string{beV2}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unhealthy") || !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("err = %v, want an unhealthy deploy that was rolled back", err)
 	}
@@ -205,12 +205,12 @@ func TestFailedRollbackIsLoud(t *testing.T) {
 	cfg := testConfig(t)
 	docker := &fakeDocker{health: map[string]string{beV2Digest: "running unhealthy"}}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
 	docker.health[beV1Digest] = "exited none" // the old release no longer comes up either
 
-	err := a.Deploy(context.Background(), "st", []string{beV2})
+	err := a.Deploy(context.Background(), "st", []string{beV2}, nil)
 	if err == nil || !strings.Contains(err.Error(), "ROLLBACK FAILED") {
 		t.Fatalf("err = %v, want a failed rollback", err)
 	}
@@ -221,7 +221,7 @@ func TestFailedRollbackIsLoud(t *testing.T) {
 
 func TestFailedFirstDeployHasNothingToRollBackTo(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{health: map[string]string{beV1Digest: "restarting none"}}
-	err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1})
+	err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no previous release") {
 		t.Fatalf("err = %v, want no rollback target", err)
 	}
@@ -234,10 +234,10 @@ func TestFailedFirstDeployHasNothingToRollBackTo(t *testing.T) {
 func TestHealthTimeout(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{health: map[string]string{beV2Digest: "running starting"}}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
-	err := a.Deploy(context.Background(), "st", []string{beV2})
+	err := a.Deploy(context.Background(), "st", []string{beV2}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not healthy after 200ms") {
 		t.Fatalf("err = %v, want a health timeout", err)
 	}
@@ -249,12 +249,12 @@ func TestHealthTimeout(t *testing.T) {
 func TestFailedPullChangesNothing(t *testing.T) {
 	cfg, docker := testConfig(t), &fakeDocker{}
 	a := testAgent(cfg, docker)
-	if err := a.Deploy(context.Background(), "st", []string{beV1}); err != nil {
+	if err := a.Deploy(context.Background(), "st", []string{beV1}, nil); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
 	docker.calls, docker.failOn = nil, " pull "
 
-	err := a.Deploy(context.Background(), "st", []string{beV2})
+	err := a.Deploy(context.Background(), "st", []string{beV2}, nil)
 	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("err = %v, want a pull failure that changed nothing", err)
 	}
@@ -284,7 +284,7 @@ func TestDeployRejectsBadRefs(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			docker := &fakeDocker{}
-			err := testAgent(testConfig(t), docker).Deploy(context.Background(), tc.project, tc.refs)
+			err := testAgent(testConfig(t), docker).Deploy(context.Background(), tc.project, tc.refs, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err = %v, want it to mention %q", err, tc.want)
 			}
@@ -318,7 +318,7 @@ func TestDeployByDigestSkipsResolution(t *testing.T) {
 	// A digest can be deployed directly (e.g. a manual rollback with
 	// j-cicd-agent deploy), with no tag lookup.
 	cfg, docker := testConfig(t), &fakeDocker{}
-	if err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1Digest}); err != nil {
+	if err := testAgent(cfg, docker).Deploy(context.Background(), "st", []string{beV1Digest}, nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	for _, c := range docker.calls {

@@ -2,8 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,5 +194,43 @@ func TestDeployFailureFailsTheRun(t *testing.T) {
 func TestShellQuote(t *testing.T) {
 	if got, want := shellQuote(`it's`), `'it'\''s'`; got != want {
 		t.Errorf("shellQuote = %s, want %s", got, want)
+	}
+}
+
+func TestDeploySendsTheReleaseComposeFile(t *testing.T) {
+	dir := t.TempDir()
+	compose := "services:\n  backend:\n    image: ${BACKEND_IMAGE}\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.vps.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := deployConfig(t, &config.Deploy{Host: "deploy@vps", ComposeFile: "compose.vps.yml"})
+	runner := &fakeRunner{}
+	var logged strings.Builder
+	p := New(dir, Options{Push: true, Deploy: true, Revision: rev, Runner: runner, Logger: log.New(&logged, "", 0)})
+	if err := p.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	ssh := sshCalls(runner.calls)
+	want := " --compose-b64 '" + base64.StdEncoding.EncodeToString([]byte(compose)) + "'"
+	if len(ssh) != 1 || !strings.HasSuffix(ssh[0], want) {
+		t.Errorf("ssh = %q, want it to end with%s", ssh, want)
+	}
+	// The log says what was sent rather than dumping it.
+	if !strings.Contains(logged.String(), "--compose-b64 <compose.vps.yml, ") || strings.Contains(logged.String(), base64.StdEncoding.EncodeToString([]byte(compose))) {
+		t.Errorf("log:\n%s", logged.String())
+	}
+}
+
+func TestMissingComposeFileIsRefusedBeforeBuilding(t *testing.T) {
+	cfg := deployConfig(t, &config.Deploy{Host: "deploy@vps", ComposeFile: "nope.yml"})
+	runner := &fakeRunner{}
+	p := New(t.TempDir(), Options{Push: true, Deploy: true, Revision: rev, Runner: runner, Logger: log.New(io.Discard, "", 0)})
+	err := p.Run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "deploy.compose_file") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("ran %q before refusing", runner.calls)
 	}
 }
