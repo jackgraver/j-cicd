@@ -88,6 +88,9 @@ containers or write its own health logic:
    **`pre_deploy`** command runs (if set) — after the pull, so a release
    that can't be pulled doesn't cost a backup, and before anything
    changes, so a failed backup cancels the deploy with nothing touched.
+   After `pre_deploy`, the project's **`pre_swap`** command runs (if set,
+   and only when its service is among those changing) inside that
+   service's *new* image — see [pre_swap](#pre_swap-migrations-and-the-like).
 6. **Waits for healthy** using the compose healthchecks (`docker inspect`
    health status), bounded by `health_timeout`. `unhealthy`, `exited`,
    `dead` or `restarting` fail immediately; a service with no healthcheck is
@@ -98,6 +101,59 @@ containers or write its own health logic:
    there is no previous release (first deploy), it says so in capitals and
    exits non-zero — an agent that keeps trying to fix production unattended
    is worse than one that stops.
+
+## pre_swap: migrations and the like
+
+A command the *new* release needs run once, before it serves traffic,
+e.g. simple-track's `/app/migrate up`. The agent decides when it runs; the
+image decides what it does, so the agent stays migration-agnostic.
+
+```yaml
+    pre_swap:
+      service: backend                 # run in this service's NEW image
+      command: ["/app/migrate", "up"]  # exec form, no shell
+      timeout: 10m                     # optional; else only the deploy's timeout
+```
+
+Deploy order: pull → `pre_deploy` (backup) → **`pre_swap`** → `up -d` →
+health check → rollback on failure. It runs as
+
+```
+env BACKEND_IMAGE=<repo@sha256:new> FRONTEND_IMAGE=<pinned> ... \
+  docker compose -f <compose_file> --env-file <env_file> \
+  run --rm --no-deps -T --name <project>-pre-swap-<time> backend /app/migrate up
+```
+
+so it gets the service's environment, networks and env file exactly as
+the real deploy does (and the release's compose file, when one is sent).
+`--no-deps` means it never starts or recreates anything else: if the
+database isn't running, the command fails rather than compose starting
+it. Output streams into the deploy log like every other command's.
+
+- **Non-zero exit or timeout aborts the deploy with no container
+  changed**, recorded as `pre_swap failed, nothing changed`. On timeout
+  (or Ctrl-C) the container is stopped with `docker stop -t 30` (SIGTERM,
+  then SIGKILL), since killing the compose client alone leaves it running;
+  `docker rm -f` is the fallback if that fails.
+- **The command should exit promptly on SIGTERM and cancel what it's
+  doing.** Killing it isn't enough: Postgres doesn't notice a client that
+  died mid-statement until that statement finishes, so a SIGKILLed
+  migration keeps running, holding its table locks against the live app,
+  before finally rolling back. (Found in acceptance testing: a timed-out
+  `ALTER TABLE` + `pg_sleep` kept an `AccessExclusiveLock` after the deploy
+  had "aborted".) simple-track's `migrate` cancels its context on SIGTERM,
+  and pgx then sends Postgres a cancel request.
+- **It is never undone.** If the new release then fails its health check,
+  images are rolled back as usual and the command's effects stay. The
+  automatic rollback doesn't run it again. For migrations that means the
+  previous release must tolerate a schema one step ahead of it (simple-track's
+  does: additive changes only, and it logs a warning). Undoing a schema
+  change is a deliberate, manual `/app/migrate down`.
+- **It is skipped when its service isn't changing** (e.g. a
+  frontend-only release).
+- **A manual rollback runs it** in the *older* image, because a rollback
+  is an ordinary deploy of the previous release. For `migrate up` that's a
+  no-op (the database is already ahead).
 
 ## Manual rollback
 
@@ -179,6 +235,10 @@ showing each release as its commit tag plus a short digest.
        timeout: 15m                   # default 15m; bounds pull + up + health wait
        pre_deploy: /usr/local/bin/backup-db  # optional; sh -c from the compose dir, before
                                       # containers change; non-zero exit cancels the deploy
+       pre_swap:                      # optional; see "pre_swap" above
+         service: backend
+         command: ["/app/migrate", "up"]
+         timeout: 10m
        services:
          - name: backend              # compose service name
            image_var: BACKEND_IMAGE   # variable the compose file interpolates
@@ -214,12 +274,6 @@ commit before running — or pass `--deploy-dirty`.
 
 ## Not done yet
 
-- **Migrations.** The agent doesn't run them; simple-track's backend
-  migrates itself on boot, and its `/health` only answers once that's done
-  and Postgres is reachable. Rollback stays image-only (see Manual
-  rollback), with the `pre_deploy` backup as the way back for schema
-  changes. Reversible (up/down) migrations would be the project's to
-  provide.
 - **Restricting the SSH key.** Today the deploy key is a normal login. A
   `command="..."` forced command in `authorized_keys` that only allows
   `j-cicd-agent deploy`/`rollback` would limit a stolen build-host key to "deploy a

@@ -41,7 +41,10 @@ resolved to, recreates only the compose services whose digest changed,
 waits for their healthchecks, and rolls back to the last healthy release
 on failure; its exit status passes or fails the run. An optional
 `pre_deploy` command in the agent's config (e.g. a database backup) runs
-before any container changes. `j-cicd rollback <name>` (or `R` in the
+before any container changes, and an optional `pre_swap` command (e.g.
+database migrations) then runs once inside one service's *new* image via
+`docker compose run`; a failure or timeout of either aborts the deploy with
+nothing changed. `j-cicd rollback <name>` (or `R` in the
 dashboard) reverts the last deploy by hand — images only, never the
 database — and is recorded in history as a `rollback` run. See [AGENT.md](AGENT.md) for the
 design and VPS setup. Not yet implemented: the stretch-goal
@@ -288,7 +291,8 @@ builds without pushing.
   - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
     implementation; `runner_unix.go` adds process-group cancellation.
 - `internal/agent/` — the VPS side: agent config (`config.go`), the
-  deploy/health-wait/rollback sequence (`agent.go`), per-project JSON state
+  deploy/health-wait/rollback sequence (`agent.go`), the `pre_swap` hook
+  (`preswap.go`), per-project JSON state
   (`state.go`), and the `flock` deploy lock (`lock_unix.go`).
 - `internal/detect/` — project inspection: Dockerfile scan, GitHub remote
   and git revision detection (`detect.go`), and the `init` scaffolding built

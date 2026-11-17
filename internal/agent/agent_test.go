@@ -32,6 +32,7 @@ type fakeDocker struct {
 	running map[string]string // image var -> ref
 	health  map[string]string // ref -> "status health"
 	failOn  string
+	hangOn  string // a matching command blocks until cancelled
 }
 
 func (f *fakeDocker) Run(ctx context.Context, dir, name string, args ...string) error {
@@ -39,6 +40,10 @@ func (f *fakeDocker) Run(ctx context.Context, dir, name string, args ...string) 
 	f.calls = append(f.calls, cmd)
 	if f.failOn != "" && strings.Contains(cmd, f.failOn) {
 		return errors.New("exit status 1")
+	}
+	if f.hangOn != "" && strings.Contains(cmd, f.hangOn) {
+		<-ctx.Done()
+		return errors.New("signal: killed")
 	}
 	if strings.Contains(cmd, " up -d ") {
 		if f.running == nil {
