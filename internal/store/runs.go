@@ -52,8 +52,11 @@ type Run struct {
 	// Images are the images this run pushed, with the registry digest
 	// each resolved to; Deployed is whether the deploy stage then handed
 	// them to DeployHost. Both are empty for a run that didn't get that far.
-	Images   []RunImage `json:"images,omitempty"`
-	Deployed bool       `json:"deployed,omitempty"`
+	Images []RunImage `json:"images,omitempty"`
+	// Artifacts are the files the steps built, by sha256 (what an
+	// artifacts deploy sends).
+	Artifacts []RunArtifact `json:"artifacts,omitempty"`
+	Deployed  bool          `json:"deployed,omitempty"`
 	// Verified are the post-deploy checks that passed.
 	Verified   []RunVerify `json:"verified,omitempty"`
 	DeployHost string      `json:"deploy_host,omitempty"`
@@ -73,6 +76,14 @@ type RunVerify struct {
 	URL      string  `json:"url"`
 	Attempts int     `json:"attempts"`
 	Seconds  float64 `json:"seconds"`
+}
+
+// RunArtifact is one artifact a run built.
+type RunArtifact struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 // RunImage is one image a run built and pushed.

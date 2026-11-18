@@ -66,8 +66,19 @@ func (p *Plan) Describe() string {
 		}
 		fmt.Fprintf(&b, "  image:   %s -> %s [%s] (%s)\n", img.Name, img.Repository, strings.Join(img.Tags, ", "), action)
 	}
+	for _, a := range p.Artifacts {
+		fmt.Fprintf(&b, "  artifact: %s <- %s (must exist after the steps)\n", a.Name, a.Path)
+	}
 	if d := p.Deploy; d != nil {
-		fmt.Fprintf(&b, "  deploy:  ssh %s %s deploy %s %s\n", d.Host, d.Command, d.Project, strings.Join(d.Images, " "))
+		via := "ssh " + d.Host
+		if d.Host == config.LocalTarget {
+			via = "locally:"
+		}
+		what := strings.Join(d.Images, " ")
+		if len(d.Artifacts) > 0 {
+			what = strings.Join(d.Artifacts, " ") + " (sent by sha256 on stdin)"
+		}
+		fmt.Fprintf(&b, "  deploy:  %s %s deploy %s %s\n", via, d.Command, d.Project, what)
 	}
 	if d := p.Deploy; d != nil {
 		for _, u := range d.Verify {

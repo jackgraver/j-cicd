@@ -71,9 +71,10 @@ type Pipeline struct {
 	httpClient  *http.Client
 	verifyEvery time.Duration
 	// Results a caller can read once Run returns.
-	images   []ImageResult
-	deployed bool
-	verified []VerifyResult
+	images    []ImageResult
+	artifacts []ArtifactResult
+	deployed  bool
+	verified  []VerifyResult
 	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
 	// it; the real one probes the local socket.
 	inspectDocker func() dockerDiagnosis
@@ -175,20 +176,25 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		})
 	}
 
+	if err := p.collectArtifacts(cfg); err != nil {
+		return err
+	}
+
 	switch {
 	case cfg.Deploy == nil:
 	case !p.push:
-		p.log.Printf("skipping deploy (--no-push: nothing new in the registry to deploy)")
+		p.log.Printf("skipping deploy (--no-push: a build-only run publishes nothing)")
 	case !p.deploy:
 		p.log.Printf("skipping deploy (--no-deploy)")
 	default:
-		p.say("deploying to %s", cfg.Deploy.Host)
+		target := cfg.Deploy.Target()
+		p.say("deploying to %s", target)
 		if err := p.runDeploy(ctx, cfg, deployRefs); err != nil {
-			return fmt.Errorf("deploy to %s failed: %w", cfg.Deploy.Host, err)
+			return fmt.Errorf("deploy to %s failed: %w", target, err)
 		}
 		p.deployed = true
 		if err := p.verify(ctx, cfg); err != nil {
-			return fmt.Errorf("deployed to %s, but %w (the new release is running; revert it with: j-cicd rollback %s)", cfg.Deploy.Host, err, cfg.Name)
+			return fmt.Errorf("deployed to %s, but %w (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}
 

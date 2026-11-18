@@ -127,7 +127,7 @@ func TestLoadValidationErrors(t *testing.T) {
 	}{
 		{"empty file", "", "config is empty"},
 		{"no name", "steps:\n  - run: make\n", "name is required"},
-		{"nothing to do", "name: demo\n", "at least one step or image"},
+		{"nothing to do", "name: demo\n", "at least one step, image or artifact"},
 		{"image without repository", "name: demo\nimages:\n  - name: backend\n", "images[0].repository is required"},
 		{"empty tag", "name: demo\nimages:\n  - repository: r\n    tags: [\"\"]\n", "empty tag"},
 		{"bad duration", "name: demo\ntimeout: soon\nsteps:\n  - run: make\n", "invalid duration"},
@@ -320,6 +320,70 @@ func TestLoadRejectsBadVerify(t *testing.T) {
 			}
 			if _, err := Load(path, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactDeploy(t *testing.T) {
+	cfg := loadOK(t, `
+name: tool
+steps: [{run: go build -o bin/ ./...}]
+artifacts:
+  - {name: tool, path: ./bin/tool}
+  - {name: tool-agent, path: bin/tool-agent}
+deploy: {local: true}
+`, "abc")
+	if !cfg.Deploy.SendsArtifacts() || cfg.Deploy.Target() != LocalTarget {
+		t.Fatalf("sends artifacts = %v, target = %q", cfg.Deploy.SendsArtifacts(), cfg.Deploy.Target())
+	}
+	if got := cfg.DeployArtifacts(); len(got) != 2 || got[0].Path != "bin/tool" {
+		t.Errorf("DeployArtifacts = %+v, want both, paths cleaned", got)
+	}
+	if cfg.DeployImages() != nil {
+		t.Errorf("DeployImages = %v, want none for an artifacts deploy", cfg.DeployImages())
+	}
+	if cfg.Deploy.Command != DefaultAgentCommand || cfg.Deploy.Project != "tool" {
+		t.Errorf("command/project = %q/%q", cfg.Deploy.Command, cfg.Deploy.Project)
+	}
+}
+
+func TestLoadDeployPicksKind(t *testing.T) {
+	both := "name: d\nimages: [{name: be, repository: r}]\nartifacts: [{name: bin, path: b}]\n"
+	cfg := loadOK(t, both+"deploy: {host: h, artifacts: [bin]}\n", "")
+	if !cfg.Deploy.SendsArtifacts() || len(cfg.DeployArtifacts()) != 1 {
+		t.Errorf("deploy.artifacts should select an artifacts deploy")
+	}
+	cfg = loadOK(t, both+"deploy: {host: h, images: [be]}\n", "")
+	if cfg.Deploy.SendsArtifacts() || len(cfg.DeployImages()) != 1 {
+		t.Errorf("deploy.images should select an images deploy")
+	}
+	// Artifacts without a deploy are still checked and reported.
+	cfg = loadOK(t, "name: d\nsteps: [{run: make}]\nartifacts: [{name: bin, path: b}]\n", "")
+	if cfg.DeployArtifacts() != nil {
+		t.Errorf("DeployArtifacts without deploy: = %v", cfg.DeployArtifacts())
+	}
+}
+
+func TestLoadRejectsBadArtifacts(t *testing.T) {
+	both := "name: d\nimages: [{name: be, repository: r}]\nartifacts: [{name: bin, path: b}]\n"
+	cases := map[string]struct{ body, want string }{
+		"no path":      {"name: d\nartifacts: [{name: bin}]\n", "path is required"},
+		"outside":      {"name: d\nartifacts: [{name: bin, path: ../bin}]\n", "inside the project"},
+		"absolute":     {"name: d\nartifacts: [{name: bin, path: /usr/bin/x}]\n", "inside the project"},
+		"bad name":     {"name: d\nartifacts: [{name: 'a b', path: b}]\n", "letters, digits"},
+		"no name":      {"name: d\nartifacts: [{path: b}]\n", "letters, digits"},
+		"twice":        {"name: d\nartifacts: [{name: b, path: b}, {name: b, path: c}]\n", "twice"},
+		"ambiguous":    {both + "deploy: {host: h}\n", "say which"},
+		"both listed":  {both + "deploy: {host: h, images: [be], artifacts: [bin]}\n", "one kind"},
+		"unknown":      {both + "deploy: {host: h, artifacts: [nope]}\n", "no artifacts: entry"},
+		"compose file": {"name: d\nartifacts: [{name: b, path: b}]\ndeploy: {host: h, compose_file: c.yml}\n", "compose_file goes with images"},
+		"host + local": {"name: d\nartifacts: [{name: b, path: b}]\ndeploy: {host: h, local: true}\n", "not both"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := loadErr(t, tc.body); !strings.Contains(got, tc.want) {
+				t.Errorf("error = %q, want it to mention %q", got, tc.want)
 			}
 		})
 	}

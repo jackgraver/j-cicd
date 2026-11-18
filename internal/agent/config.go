@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -39,11 +41,14 @@ type Config struct {
 	Projects []Project `yaml:"projects"`
 }
 
-// Project is one compose stack the agent may deploy to.
+// Project is one thing the agent may deploy: either a compose stack
+// (compose_file + services:, deployed from images) or a set of installed
+// files (files:, deployed from artifacts the build host sends), with an
+// optional systemd unit that runs them.
 type Project struct {
 	// Name is what the build host's deploy.project refers to.
 	Name        string `yaml:"name"`
-	ComposeFile string `yaml:"compose_file"`
+	ComposeFile string `yaml:"compose_file,omitempty"`
 	// EnvFile is passed to compose as --env-file. Variables the agent
 	// sets for a deploy override values in it.
 	EnvFile string `yaml:"env_file,omitempty"`
@@ -55,8 +60,9 @@ type Project struct {
 	// gets a fresh budget of the same size.
 	Timeout *config.Duration `yaml:"timeout,omitempty"`
 	// PreDeploy is a shell command run (sh -c, from the compose file's
-	// directory) once the new images are pulled and before any container
-	// is touched — e.g. a database backup. If it fails the deploy stops
+	// directory; for a files project, from the agent's working directory)
+	// once the new images are pulled (files received) and before any
+	// container (file) is touched — e.g. a database backup. If it fails the deploy stops
 	// with nothing changed. It runs for manual rollbacks too, but not for
 	// the automatic rollback after a failed deploy (it already ran).
 	// J_CICD_PROJECT, J_CICD_SERVICES (space-separated) and J_CICD_RELEASE
@@ -65,7 +71,20 @@ type Project struct {
 	// PreSwap runs a command in one service's new image after pre_deploy
 	// and before any container changes (e.g. database migrations).
 	PreSwap  *PreSwap  `yaml:"pre_swap,omitempty"`
-	Services []Service `yaml:"services"`
+	Services []Service `yaml:"services,omitempty"`
+
+	// Files are what a files project installs, each atomically replaced
+	// by the artifact of the same name.
+	Files []File `yaml:"files,omitempty"`
+	// Systemd is the unit that runs the files, restarted after they are
+	// replaced and watched until it has stayed up. Optional: a CLI has
+	// none.
+	Systemd *Unit `yaml:"systemd,omitempty"`
+	// Check is a command (exec form, no shell) run once the files are in
+	// place and the unit has settled; a non-zero exit fails the deploy and
+	// rolls it back. J_CICD_PROJECT and J_CICD_REVISION are in its
+	// environment.
+	Check []string `yaml:"check,omitempty"`
 
 	// inUse, when set, is a compose file from a release (sent by the build
 	// host) to run instead of ComposeFile. ComposeFile's directory stays
@@ -135,9 +154,33 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// File is one file a files project installs.
+type File struct {
+	// Name matches the artifact name in the build host's .cicd.yaml.
+	Name string `yaml:"name"`
+	// Path is the absolute path the file is installed at. Its directory
+	// must be writable by the agent: the new file is written beside it
+	// and renamed over it, so nothing ever sees a half-written file.
+	Path string `yaml:"path"`
+	// Mode is the file's permissions, in octal. Default "0755".
+	Mode string `yaml:"mode,omitempty"`
+
+	mode os.FileMode
+}
+
+// IsFiles reports whether the project installs files rather than
+// running compose services.
+func (p *Project) IsFiles() bool { return len(p.Files) > 0 }
+
 func (p *Project) validate() error {
+	if p.IsFiles() {
+		return p.validateFiles()
+	}
+	if p.Systemd != nil || len(p.Check) > 0 {
+		return errors.New("systemd: and check: go with files:; a compose project is checked by its healthchecks")
+	}
 	if p.ComposeFile == "" {
-		return errors.New("compose_file is required")
+		return errors.New("compose_file is required (or files: for a project that installs files)")
 	}
 	if len(p.Services) == 0 {
 		return errors.New("services: must list at least one service")
@@ -194,6 +237,56 @@ func (p *Project) timeout() time.Duration {
 		return p.Timeout.Duration
 	}
 	return DefaultTimeout
+}
+
+func (p *Project) validateFiles() error {
+	switch {
+	case p.ComposeFile != "" || len(p.Services) > 0 || p.EnvFile != "":
+		return errors.New("has files: and compose settings; a project installs files or runs compose services, not both")
+	case p.PreSwap != nil:
+		return errors.New("pre_swap runs in a compose service's image; a files project has none (use check:, or pre_deploy)")
+	case p.Check != nil && (len(p.Check) == 0 || p.Check[0] == ""):
+		return errors.New("check: needs a command")
+	}
+	names, paths := map[string]bool{}, map[string]bool{}
+	for i := range p.Files {
+		f := &p.Files[i]
+		switch {
+		case !config.ValidArtifactName(f.Name):
+			return fmt.Errorf("files[%d].name %q must be letters, digits, '.', '_' and '-'", i, f.Name)
+		case !filepath.IsAbs(f.Path) || filepath.Clean(f.Path) != f.Path:
+			return fmt.Errorf("files[%d].path %q must be a clean absolute path", i, f.Path)
+		case names[f.Name]:
+			return fmt.Errorf("file %q is listed twice", f.Name)
+		case paths[f.Path]:
+			return fmt.Errorf("path %s is used by two files", f.Path)
+		}
+		names[f.Name], paths[f.Path] = true, true
+		f.mode = 0o755
+		if f.Mode != "" {
+			m, err := strconv.ParseUint(f.Mode, 8, 32)
+			if err != nil || m > 0o7777 {
+				return fmt.Errorf("files[%d].mode %q must be octal permissions like \"0755\"", i, f.Mode)
+			}
+			f.mode = os.FileMode(m) & os.ModePerm
+			if m&0o7000 != 0 {
+				return fmt.Errorf("files[%d].mode %q: setuid, setgid and sticky bits aren't supported", i, f.Mode)
+			}
+		}
+	}
+	if p.Systemd != nil {
+		return p.Systemd.validate()
+	}
+	return nil
+}
+
+func (p *Project) fileNamed(name string) *File {
+	for i := range p.Files {
+		if p.Files[i].Name == name {
+			return &p.Files[i]
+		}
+	}
+	return nil
 }
 
 func (p *Project) serviceFor(repository string) *Service {

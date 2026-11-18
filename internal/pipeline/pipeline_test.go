@@ -22,6 +22,19 @@ type fakeRunner struct {
 	lastDir string
 	// inspected are the image refs whose pushed digest was read back.
 	inspected []string
+	// stdin is what RunInput was fed, read in full.
+	stdin []byte
+}
+
+// RunInput records the call like Run, and reads stdin to the end the way
+// the agent would.
+func (f *fakeRunner) RunInput(ctx context.Context, stdin io.Reader, dir, name string, args ...string) error {
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	f.stdin = data
+	return f.Run(ctx, dir, name, args...)
 }
 
 func (f *fakeRunner) Run(ctx context.Context, dir, name string, args ...string) error {

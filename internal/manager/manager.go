@@ -406,8 +406,11 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 	for _, v := range p.Verified() {
 		env.run.Verified = append(env.run.Verified, store.RunVerify{URL: v.URL, Attempts: v.Attempts, Seconds: v.Duration.Round(100 * time.Millisecond).Seconds()})
 	}
+	for _, a := range p.Artifacts() {
+		env.run.Artifacts = append(env.run.Artifacts, store.RunArtifact{Name: a.Name, Path: filepath.ToSlash(a.Path), SHA256: a.SHA256, Size: a.Size})
+	}
 	if p.Deployed() {
-		env.run.Deployed, env.run.DeployHost = true, cfg.Deploy.Host
+		env.run.Deployed, env.run.DeployHost = true, cfg.Deploy.Target()
 	}
 	if err != nil {
 		if ctx.Err() != nil {
