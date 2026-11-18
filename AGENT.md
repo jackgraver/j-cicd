@@ -2,7 +2,9 @@
 
 `j-cicd run` used to end at "pushed to GHCR"; nothing restarted production.
 `j-cicd-agent` is the half that runs on the VPS. It is triggered by the build
-host as the **last stage of the run**:
+host as the **last stage of the run**. It deploys compose stacks from images
+(below) and, for projects that ship binaries, installed files and the
+systemd units that run them ([Files projects](#files-projects-binaries-and-systemd-services)):
 
 ```
 build host (j-cicd run)                         VPS (j-cicd-agent)
@@ -178,6 +180,119 @@ Interrupting a deploy (Ctrl-C on the build host, or the run's timeout) still
 rolls back. A dropped SSH connection doesn't abandon a half-finished rollout:
 the agent ignores SIGHUP/SIGPIPE and finishes (or rolls back) on its own.
 
+## Files projects: binaries and systemd services
+
+Not everything ships as an image. A CLI on the build host, or a static
+binary run by systemd on the VPS (vpsm's mini-bot), is a **files project**:
+the agent config lists `files:` instead of `compose_file`/`services:`, and
+the build host's `.cicd.yaml` lists `artifacts:` instead of `images:`. The
+deploy gets the same guarantees as a compose one, in the same order:
+
+```
+build host                                    agent (VPS, or this machine)
+──────────                                    ────────────────────────────
+refuse up front if tree is dirty / no commit
+steps -> artifacts must exist -> sha256 each
+ssh host j-cicd-agent deploy <project>  ────► lock project
+    name@sha256:<hex>... --artifacts-stdin     receive the tar, store each file under its hash,
+    --revision <commit>   (+ tar on stdin)       refuse any that doesn't hash to its ref
+                                               preflight: in the store, target dir writable,
+                                                 unit known to systemd       (else: nothing changed)
+                                               keep what's on disk if the agent didn't put it there
+                                               pre_deploy
+                                               install: write beside, fsync, rename over (atomic)
+                                               systemctl restart <unit>; must stay active on the
+                                                 same main pid, restart counter unchanged, for settle
+                                               check: command must exit 0
+                                                 ok     -> record, exit 0
+                                                 failed -> put the previous files back, restart,
+                                                           settle, check; exit 1
+```
+
+- **Content-addressed, like digests.** A release of a file is its sha256.
+  Every release the agent installs is kept in
+  `<state_dir>/<project>.files/<sha256>/<name>` (current and previous;
+  older ones are pruned), and is re-hashed on its way into place, so a
+  corrupted store copy is refused rather than installed. Rollback needs
+  nothing from the build host, and `j-cicd-agent deploy <project>
+  name@sha256:<hex>` (no stdin) re-deploys any stored release.
+- **Atomic replace, not `cp` or `go install`.** The new file is written
+  next to the target and renamed over it. A running process keeps its old
+  inode, nothing ever executes half a file, and the agent can replace its
+  own binary (or j-cicd's) mid-run.
+- **Even the first deploy can be undone.** A file at the target path that
+  the agent didn't install (what was there before the first deploy, or a
+  hand-copied hotfix since) is stored and recorded as the release to roll
+  back to, shown as `untracked` in `status`, instead of being lost.
+- **"Active" is not "healthy".** A service that crashes on start is
+  restarted by systemd and reads `active` again a second later. After its
+  restart the unit must stay active on one main PID, with `NRestarts`
+  unchanged, for `settle` (default 10s), within `health_timeout`; a
+  `failed` unit or one in `auto-restart` fails at once. The unit's last
+  journal lines go into the deploy log on failure.
+- **check:** is an exec-form command run after the restart (or right after
+  the install, for a CLI with no unit), with `J_CICD_PROJECT` and
+  `J_CICD_REVISION` set. Exit non-zero and the deploy rolls back. Typical:
+  the binary's `version` must print the revision it was built from.
+
+```yaml
+projects:
+  - name: mini-bot
+    files:
+      - name: mini-bot                # = artifacts: name in .cicd.yaml
+        path: /opt/vpsm/bin/mini-bot  # absolute; its directory must be writable by the agent
+        mode: "0755"                  # optional, default 0755
+    systemd:                          # optional
+      unit: mini-bot.service
+      scope: system                   # default; "user" for systemctl --user
+      settle: 15s                     # default 10s
+    # check: ["/opt/vpsm/bin/mini-bot", "--version"]   # optional exec-form command
+    health_timeout: 60s               # bounds settle + check, as for compose
+    pre_deploy: ...                   # optional, as for compose (run from the agent's cwd)
+```
+
+**Privileges.** The agent stays an unprivileged user. Two things need
+care for a service that runs as root:
+
+1. The binary's directory must be writable by the agent (the atomic
+   rename needs it), so it can't be `/usr/local/bin`. Use a directory the
+   deploy user owns (`/opt/vpsm/bin`), point the unit's `ExecStart` there,
+   and symlink `/usr/local/bin/<name>` to it if it should be on `PATH`.
+2. Restarting a system unit: a non-root agent runs `sudo -n systemctl
+   restart <unit>` (never prompting), so add exactly that to sudoers:
+   `deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart mini-bot.service`.
+   vpsm's `install.sh <host-id> <pull-user> <deploy-user>` sets up both.
+
+Either way the deploy user then decides what root executes, so it should
+be a user that could already become root (docker group, sudo) — that is
+true of any compose deploy user too.
+
+### Local deploys
+
+`deploy: {local: true}` runs the agent on the build host itself
+(`sh -c "<command> deploy ..."`, no ssh), with its own config — which is
+how j-cicd installs itself and the vpsm CLIs into `~/.local/bin`:
+
+```yaml
+# ~/.config/j-cicd-agent.yaml on the build host
+state_dir: /home/you/.local/state/j-cicd-agent
+projects:
+  - name: j-cicd
+    files:
+      - {name: j-cicd, path: /home/you/.local/bin/j-cicd}
+      - {name: j-cicd-agent, path: /home/you/.local/bin/j-cicd-agent}
+    check: ["sh", "-c", "for b in j-cicd j-cicd-agent; do /home/you/.local/bin/$b version | grep -qF -- \"$J_CICD_REVISION\" || { echo \"$b does not report $J_CICD_REVISION\" >&2; exit 1; }; done"]
+```
+
+and in the project's `.cicd.yaml`:
+`deploy: {local: true, command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml j-cicd-agent}`.
+The binary that runs the deploy is the *installed* agent, so the first
+agent that understands artifacts has to be installed by hand once
+(`GOBIN=~/.local/bin go install ./cmd/...`); after that each release
+installs the next. The same goes for the agent on the VPS
+(`.cicd-vps-agent.yaml`): copy it by hand once, and from then on
+`j-cicd run j-cicd-vps-agent` has the running agent replace itself.
+
 ## State
 
 One JSON file per project, `<state_dir>/<project>.json`, written atomically:
@@ -282,3 +397,5 @@ commit before running — or pass `--deploy-dirty`.
 - **vpsm event reporting**, so deploys appear on the same timeline as the
   metrics they affect.
 - **Multi-host.** One `deploy:` host per project for now.
+- **Shipping unit files.** A files deploy replaces binaries; changes to a
+  systemd unit itself still go through the host's own install script.

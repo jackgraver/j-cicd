@@ -36,8 +36,11 @@ type Config struct {
 	Timeout *Duration `yaml:"timeout,omitempty"`
 	Steps   []Step    `yaml:"steps,omitempty"`
 	Images  []Image   `yaml:"images,omitempty"`
-	// Deploy, when set, hands the pushed images to the deploy agent on
-	// the VPS as the last stage of the run.
+	// Artifacts are files the steps produce that are the release (for a
+	// project that ships binaries rather than images).
+	Artifacts []Artifact `yaml:"artifacts,omitempty"`
+	// Deploy, when set, hands the pushed images (or the artifacts) to the
+	// deploy agent as the last stage of the run.
 	Deploy *Deploy `yaml:"deploy,omitempty"`
 }
 
@@ -149,8 +152,8 @@ func (c *Config) applyDefaults(revision string) error {
 	if c.Branch != "" && (strings.HasPrefix(c.Branch, "-") || strings.ContainsAny(c.Branch, " \t\n")) {
 		return fmt.Errorf("branch %q is not a valid branch name", c.Branch)
 	}
-	if len(c.Steps) == 0 && len(c.Images) == 0 {
-		return errors.New("must define at least one step or image")
+	if len(c.Steps) == 0 && len(c.Images) == 0 && len(c.Artifacts) == 0 {
+		return errors.New("must define at least one step, image or artifact")
 	}
 
 	for i := range c.Steps {
@@ -198,6 +201,9 @@ func (c *Config) applyDefaults(revision string) error {
 		}
 	}
 
+	if err := c.validateArtifacts(); err != nil {
+		return err
+	}
 	if c.Deploy != nil {
 		if err := c.Deploy.applyDefaults(c); err != nil {
 			return fmt.Errorf("deploy: %w", err)

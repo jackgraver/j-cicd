@@ -1,0 +1,26 @@
+# j-cicd builds and installs itself: check, build both binaries stamped with
+# the commit, and have the local j-cicd-agent install them into ~/.local/bin
+# (atomic replace; both must report this commit from `version`, else the
+# previous binaries go back). `j-cicd rollback j-cicd` reverts by hand.
+#
+# Needs the local agent config (~/.config/j-cicd-agent.yaml, see AGENT.md,
+# "Files projects") and, once, a j-cicd-agent new enough to take artifacts.
+name: j-cicd
+branch: main
+steps:
+  - name: fmt
+    run: 'out=$(gofmt -l .); [ -z "$out" ] || { echo "not gofmt-formatted:"; echo "$out"; exit 1; }'
+  - name: vet
+    run: go vet ./...
+  - name: test
+    run: go test ./...
+  - name: build
+    run: go build -trimpath -ldflags "-X main.version=$J_CICD_REVISION" -o dist/ ./cmd/...
+artifacts:
+  - name: j-cicd
+    path: dist/j-cicd
+  - name: j-cicd-agent
+    path: dist/j-cicd-agent
+deploy:
+  local: true
+  command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml j-cicd-agent

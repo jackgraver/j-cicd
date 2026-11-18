@@ -13,6 +13,8 @@ import (
 type Plan struct {
 	Steps  []PlanStep  `json:"steps"`
 	Images []PlanImage `json:"images"`
+	// Artifacts are the files the steps must produce.
+	Artifacts []PlanArtifact `json:"artifacts,omitempty"`
 	// Deploy is nil when the run wouldn't deploy (no deploy: section,
 	// --no-push or --no-deploy); Skipped then says why.
 	Deploy  *PlanDeploy `json:"deploy,omitempty"`
@@ -37,12 +39,22 @@ type PlanImage struct {
 	Push       bool     `json:"push"`
 }
 
-// PlanDeploy is the ssh deploy stage.
+// PlanArtifact is one file the steps must leave behind.
+type PlanArtifact struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// PlanDeploy is the deploy stage.
 type PlanDeploy struct {
+	// Host is the ssh destination, or "local" for a local deploy.
 	Host    string   `json:"host"`
 	Project string   `json:"project"`
 	Command string   `json:"command"`
 	Images  []string `json:"images"`
+	// Artifacts are the files sent instead of images, as name=path; their
+	// hashes are known only once the steps have built them.
+	Artifacts []string `json:"artifacts,omitempty"`
 	// Compose is the compose file sent along, if any.
 	Compose string `json:"compose_file,omitempty"`
 	// Verify are the URLs checked after the deploy.
@@ -61,11 +73,14 @@ func (p *Pipeline) Plan(cfg *config.Config) Plan {
 			Dockerfile: filepath.ToSlash(img.Dockerfile), Push: p.push,
 		})
 	}
+	for _, a := range cfg.Artifacts {
+		plan.Artifacts = append(plan.Artifacts, PlanArtifact{Name: a.Name, Path: filepath.ToSlash(a.Path)})
+	}
 
 	switch {
 	case cfg.Deploy == nil:
 	case !p.push:
-		plan.Skipped = append(plan.Skipped, "deploy (--no-push: nothing new in the registry to deploy)")
+		plan.Skipped = append(plan.Skipped, "deploy (--no-push: a build-only run publishes nothing)")
 	case !p.deploy:
 		plan.Skipped = append(plan.Skipped, "deploy (--no-deploy)")
 	default:
@@ -78,9 +93,13 @@ func (p *Pipeline) Plan(cfg *config.Config) Plan {
 		for _, v := range cfg.Deploy.Verify {
 			verify = append(verify, expandRevision(v.URL, p.revision))
 		}
+		var arts []string
+		for _, a := range cfg.DeployArtifacts() {
+			arts = append(arts, a.Name+"="+filepath.ToSlash(a.Path))
+		}
 		plan.Deploy = &PlanDeploy{Verify: verify,
-			Host: cfg.Deploy.Host, Project: cfg.Deploy.Project, Command: strings.TrimSpace(cfg.Deploy.Command),
-			Images: refs, Compose: cfg.Deploy.ComposeFile,
+			Host: cfg.Deploy.Target(), Project: cfg.Deploy.Project, Command: strings.TrimSpace(cfg.Deploy.Command),
+			Images: refs, Artifacts: arts, Compose: cfg.Deploy.ComposeFile,
 		}
 	}
 	return plan

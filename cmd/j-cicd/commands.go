@@ -259,6 +259,9 @@ func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 			}
 			log.Printf("  pushed %s: %s", img.Name, ref)
 		}
+		for _, a := range run.Artifacts {
+			log.Printf("  built %s: %s (sha256:%s)", a.Name, a.Path, a.SHA256[:min(12, len(a.SHA256))])
+		}
 		if run.Deployed {
 			log.Printf("  deployed to %s", run.DeployHost)
 		}

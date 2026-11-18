@@ -20,6 +20,13 @@ type CommandRunner interface {
 	Output(ctx context.Context, dir, name string, args ...string) ([]byte, error)
 }
 
+// InputRunner is a CommandRunner that can also feed a command's stdin,
+// which is how a deploy streams artifacts to the agent.
+type InputRunner interface {
+	// RunInput is Run with stdin connected to r.
+	RunInput(ctx context.Context, stdin io.Reader, dir, name string, args ...string) error
+}
+
 // ExecRunner runs commands as real child processes.
 type ExecRunner struct {
 	// Stdout and Stderr receive the command's output. Nil means j-cicd's
@@ -35,6 +42,20 @@ type ExecRunner struct {
 func (r ExecRunner) Run(ctx context.Context, dir, name string, args ...string) error {
 	cmd := command(ctx, dir, name, args...)
 	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
+	r.addEnv(cmd)
+	if cmd.Stdout == nil {
+		cmd.Stdout = os.Stdout
+	}
+	if cmd.Stderr == nil {
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
+// RunInput implements InputRunner.
+func (r ExecRunner) RunInput(ctx context.Context, stdin io.Reader, dir, name string, args ...string) error {
+	cmd := command(ctx, dir, name, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, r.Stdout, r.Stderr
 	r.addEnv(cmd)
 	if cmd.Stdout == nil {
 		cmd.Stdout = os.Stdout

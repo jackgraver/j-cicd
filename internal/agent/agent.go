@@ -31,6 +31,9 @@ type Agent struct {
 	log          *log.Logger
 	pollInterval time.Duration
 	now          func() time.Time
+	// isRoot reports whether the agent runs as root (systemd restarts
+	// then need no sudo). Tests replace it.
+	isRoot func() bool
 }
 
 // New returns an Agent for cfg.
@@ -41,6 +44,7 @@ func New(cfg *Config, opts Options) *Agent {
 		log:          opts.Logger,
 		pollInterval: 2 * time.Second,
 		now:          time.Now,
+		isRoot:       func() bool { return os.Geteuid() == 0 },
 	}
 	if a.runner == nil {
 		a.runner = pipeline.ExecRunner{}
@@ -133,6 +137,9 @@ func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string, c
 	if err != nil {
 		return err
 	}
+	if proj.IsFiles() {
+		return fmt.Errorf("project %q installs files (files: in the agent config), so it is deployed with artifacts, not images", proj.Name)
+	}
 	releases, err := proj.resolve(refs)
 	if err != nil {
 		return err
@@ -161,6 +168,9 @@ func (a *Agent) Rollback(ctx context.Context, projectName string) error {
 	proj, err := a.cfg.Project(projectName)
 	if err != nil {
 		return err
+	}
+	if proj.IsFiles() {
+		return a.rollbackFiles(ctx, proj)
 	}
 	return a.locked(ctx, proj, func(st *State) error {
 		releases, err := lastDeployed(proj, st)
@@ -351,17 +361,23 @@ func (a *Agent) recordUntouched(proj *Project, st *State, rs []release, result s
 // preDeploy runs the project's pre_deploy command, if it has one, with
 // what's about to change in its environment.
 func (a *Agent) preDeploy(ctx context.Context, proj *Project, changed []release) error {
-	if proj.PreDeploy == "" {
-		return nil
-	}
 	var parts []string
 	for _, r := range changed {
 		parts = append(parts, r.svc.Name+"="+shortLabel(r))
 	}
+	return a.runPreDeploy(ctx, proj, filepath.Dir(proj.ComposeFile), serviceNames(changed), parts)
+}
+
+// runPreDeploy runs pre_deploy (sh -c, from dir) with J_CICD_SERVICES set
+// to names (services or files) and J_CICD_RELEASE to parts (name=release).
+func (a *Agent) runPreDeploy(ctx context.Context, proj *Project, dir string, names, parts []string) error {
+	if proj.PreDeploy == "" {
+		return nil
+	}
 	a.log.Printf("pre_deploy: %s", proj.PreDeploy)
-	return a.runner.Run(ctx, filepath.Dir(proj.ComposeFile), "env",
+	return a.runner.Run(ctx, dir, "env",
 		"J_CICD_PROJECT="+proj.Name,
-		"J_CICD_SERVICES="+strings.Join(serviceNames(changed), " "),
+		"J_CICD_SERVICES="+strings.Join(names, " "),
 		"J_CICD_RELEASE="+strings.Join(parts, " "),
 		"sh", "-c", proj.PreDeploy)
 }

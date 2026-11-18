@@ -44,8 +44,13 @@ on failure; its exit status passes or fails the run. An optional
 before any container changes, and an optional `pre_swap` command (e.g.
 database migrations) then runs once inside one service's *new* image via
 `docker compose run`; a failure or timeout of either aborts the deploy with
-nothing changed. `j-cicd rollback <name>` (or `R` in the
-dashboard) reverts the last deploy by hand — images only, never the
+nothing changed. Projects that ship binaries instead of images (a CLI,
+a systemd service) list them under `artifacts:`; the deploy sends the files
+by sha256 and the agent installs them atomically, restarts their unit,
+waits for it to stay up, runs a check, and rolls back the same way — on
+the VPS over ssh, or on this machine with `deploy.local` (j-cicd installs
+itself into `~/.local/bin` this way). `j-cicd rollback <name>` (or `R` in the
+dashboard) reverts the last deploy by hand — images or files, never the
 database — and is recorded in history as a `rollback` run. See [AGENT.md](AGENT.md) for the
 design and VPS setup. Not yet implemented: the stretch-goal
 failure-investigation agent.
@@ -83,14 +88,35 @@ images:                 # optional list — omit if there's no docker stage
 Each entry in `images:` is built and (optionally) pushed independently, so
 multi-service projects just list one entry per service/Dockerfile.
 
+A project that ships files rather than images lists them as `artifacts:`
+(what its steps leave behind):
+
+```yaml
+artifacts:
+  - name: mini-bot          # what the agent's config calls it (files: name)
+    path: dist/mini-bot     # relative to the project dir
+```
+
+After the steps each must exist (a missing one fails the run by name); its
+sha256 identifies the release the way a digest does an image, and is
+recorded in the run (`artifacts` in `--json`). A deploy of artifacts
+streams them to the agent as a tar on the ssh connection's stdin,
+`j-cicd-agent deploy <project> name@sha256:<hex>... --artifacts-stdin
+--revision <rev>`; the agent refuses any file that doesn't hash to its ref.
+A deploy sends images or artifacts, never both: with both in the config,
+`deploy.images` or `deploy.artifacts` says which. Build-only runs
+(`--no-push`, `b`) still build and hash them, but don't deploy.
+
 An optional `deploy:` section hands the pushed images to the VPS:
 
 ```yaml
 deploy:
-  host: deploy@vps.example.com   # required: ssh destination or ~/.ssh/config alias
+  host: deploy@vps.example.com   # ssh destination or ~/.ssh/config alias
+  # local: true                  # instead of host: run the agent on this machine (sh -c, no ssh)
   command: j-cicd-agent          # optional: how to invoke the agent remotely
   project: my-project            # optional, default name: — the project in the agent's config
   images: [backend]              # optional, default all images: entries (by name)
+  # artifacts: [mini-bot]        # optional, the same for artifacts: entries
   timeout: 10m                   # optional, default the top-level timeout
   compose_file: deploy/compose.yaml   # optional: sent with the deploy
   verify:                        # optional: checks of the live site after the deploy
@@ -244,6 +270,10 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>... [--config path]` — on
   the VPS: deploy, health-check, roll back on failure. Normally run by
   `j-cicd run` over ssh rather than by hand.
+- `j-cicd-agent deploy <project> <name@sha256:...>... [--artifacts-stdin]
+  [--revision rev]` — the same for a files project: receive the files
+  (a tar on stdin), install, restart, check, roll back on failure. Without
+  `--artifacts-stdin` it deploys releases already in the agent's store.
 - `j-cicd-agent rollback <project> [--config path]` — put the services the
   last successful deploy changed back on their previous release (pull,
   `pre_deploy`, up, health check). Running it again undoes it.
@@ -355,12 +385,17 @@ builds without pushing.
   - `dockercheck.go` — the pre-run Docker check, diagnosis, and
     auto-start; `dockercheck_unix.go` probes the socket and groups.
   - `deploy.go` — the deploy preconditions (per-commit tag, clean tree)
-    and the `ssh ... j-cicd-agent deploy` invocation.
+    and the agent invocation (`ssh ... j-cicd-agent deploy`, or `sh -c`
+    for a local deploy).
+  - `artifacts.go` — checking and hashing `artifacts:` after the steps,
+    and the tar stream a deploy sends them in.
   - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
     implementation; `runner_unix.go` adds process-group cancellation.
 - `internal/agent/` — the VPS side: agent config (`config.go`), the
   deploy/health-wait/rollback sequence (`agent.go`), the `pre_swap` hook
-  (`preswap.go`), per-project JSON state
+  (`preswap.go`), files projects — blob store, atomic install, drift
+  adoption, rollback (`files.go`) — and their systemd restart and settle
+  check (`systemd.go`), per-project JSON state
   (`state.go`), and the `flock` deploy lock (`lock_unix.go`).
 - `internal/detect/` — project inspection: Dockerfile scan, GitHub remote
   and git revision detection (`detect.go`), and the `init` scaffolding built

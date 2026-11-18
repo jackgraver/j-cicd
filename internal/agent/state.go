@@ -21,6 +21,9 @@ const (
 	resultUntouched       = "failed to pull, nothing changed"
 	resultPreDeployFailed = "pre_deploy failed, nothing changed"
 	resultPreSwapFailed   = "pre_swap failed, nothing changed"
+	resultReceiveFailed   = "artifacts not received, nothing changed"
+	resultPreflightFailed = "preflight failed, nothing changed"
+	resultInstallFailed   = "install failed, nothing changed"
 )
 
 // State is what the agent remembers about one project between deploys:
@@ -116,9 +119,11 @@ func (s *State) pruneCompose(stateDir, project string) error {
 	return nil
 }
 
-// ServiceState tracks one compose service.
+// ServiceState tracks one compose service, or one file of a files
+// project (keyed by file name; Current and Previous are then
+// sha256:<hex> and the tags are the revisions they were built from).
 type ServiceState struct {
-	Repository string `json:"repository"`
+	Repository string `json:"repository,omitempty"`
 	// Current is the last release that passed its health check, as
 	// repo@sha256:...: what should be running, and the rollback target
 	// for the next deploy.
