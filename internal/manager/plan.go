@@ -57,6 +57,11 @@ func (p *Plan) Describe() string {
 	if d := p.Deploy; d != nil {
 		fmt.Fprintf(&b, "  deploy:  ssh %s %s deploy %s %s\n", d.Host, d.Command, d.Project, strings.Join(d.Images, " "))
 	}
+	if d := p.Deploy; d != nil {
+		for _, u := range d.Verify {
+			fmt.Fprintf(&b, "  verify:  GET %s until it serves this release\n", u)
+		}
+	}
 	for _, s := range p.Skipped {
 		fmt.Fprintf(&b, "  skipped: %s\n", s)
 	}

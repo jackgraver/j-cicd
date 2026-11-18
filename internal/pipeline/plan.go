@@ -45,6 +45,8 @@ type PlanDeploy struct {
 	Images  []string `json:"images"`
 	// Compose is the compose file sent along, if any.
 	Compose string `json:"compose_file,omitempty"`
+	// Verify are the URLs checked after the deploy.
+	Verify []string `json:"verify,omitempty"`
 }
 
 // Plan describes what Run(cfg) would do with the pipeline's options.
@@ -72,7 +74,11 @@ func (p *Pipeline) Plan(cfg *config.Config) Plan {
 			plan.Problems = append(plan.Problems, "cannot deploy this build: "+err.Error())
 			break
 		}
-		plan.Deploy = &PlanDeploy{
+		var verify []string
+		for _, v := range cfg.Deploy.Verify {
+			verify = append(verify, expandRevision(v.URL, p.revision))
+		}
+		plan.Deploy = &PlanDeploy{Verify: verify,
 			Host: cfg.Deploy.Host, Project: cfg.Deploy.Project, Command: strings.TrimSpace(cfg.Deploy.Command),
 			Images: refs, Compose: cfg.Deploy.ComposeFile,
 		}

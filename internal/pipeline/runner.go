@@ -26,6 +26,8 @@ type ExecRunner struct {
 	// own stdout/stderr. Passing the same writer for both interleaves them
 	// in order, which is what a run log wants.
 	Stdout, Stderr io.Writer
+	// Env is added to j-cicd's own environment for every command.
+	Env []string
 }
 
 // Run implements CommandRunner. Cancelling ctx (a step timeout, Ctrl-C)
@@ -33,6 +35,7 @@ type ExecRunner struct {
 func (r ExecRunner) Run(ctx context.Context, dir, name string, args ...string) error {
 	cmd := command(ctx, dir, name, args...)
 	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
+	r.addEnv(cmd)
 	if cmd.Stdout == nil {
 		cmd.Stdout = os.Stdout
 	}
@@ -47,10 +50,17 @@ func (r ExecRunner) Run(ctx context.Context, dir, name string, args ...string) e
 func (r ExecRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := command(ctx, dir, name, args...)
 	cmd.Stderr = r.Stderr
+	r.addEnv(cmd)
 	if cmd.Stderr == nil {
 		cmd.Stderr = os.Stderr
 	}
 	return cmd.Output()
+}
+
+func (r ExecRunner) addEnv(cmd *exec.Cmd) {
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
 }
 
 func command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {

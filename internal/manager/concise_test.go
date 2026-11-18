@@ -206,3 +206,22 @@ func TestFailureTailIsOnlyTheFailingStage(t *testing.T) {
 		t.Errorf("progress:\n%s", progress.String())
 	}
 }
+
+// Steps see the revision the images will be tagged with, so they can
+// stamp it into what they build.
+func TestStepsGetRevisionInEnvironment(t *testing.T) {
+	st, target, mainRev := releaseRepo(t)
+	write(t, filepath.Join(target.Dir, ".cicd.yaml"), "name: app\nbranch: main\nsteps:\n  - name: stamp\n    run: echo stamped-$J_CICD_REVISION\n")
+	gitT(t, target.Dir, "checkout", "-q", "main")
+	gitT(t, target.Dir, "add", ".")
+	gitT(t, target.Dir, "commit", "-q", "-m", "stamp step")
+	mainRev = gitT(t, target.Dir, "rev-parse", "--short=12", "main")
+
+	var echo strings.Builder
+	if _, err := Run(context.Background(), st, target, Options{Echo: &echo}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(echo.String(), "stamped-"+mainRev+"\n") {
+		t.Errorf("output:\n%s", echo.String())
+	}
+}

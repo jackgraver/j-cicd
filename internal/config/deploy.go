@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -43,6 +44,59 @@ type Deploy struct {
 	// rollback restores the one that went with the previous release).
 	// Unset, the agent uses the compose file named in its own config.
 	ComposeFile string `yaml:"compose_file,omitempty"`
+	// Verify are checks run against the live site after the agent reports
+	// a healthy deploy, to prove users are being served this release.
+	Verify []Verify `yaml:"verify,omitempty"`
+}
+
+// DefaultVerifyTimeout is how long a verify check keeps retrying before
+// the run fails: containers, proxies and caches take a moment to settle.
+const DefaultVerifyTimeout = 2 * time.Minute
+
+// RevisionPlaceholder in a verify url or expect_body_contains is replaced
+// by the revision that was just deployed.
+const RevisionPlaceholder = "{{revision}}"
+
+// Verify is one post-deploy check: fetch URL (from the build host, the
+// way users reach it) until it answers as expected, or Timeout passes.
+// The usual use is a version endpoint whose body contains the commit the
+// build was made from, which catches a healthy container behind a stale
+// cache or proxy.
+type Verify struct {
+	URL string `yaml:"url"`
+	// ExpectStatus is the HTTP status that counts as success. Default 200.
+	ExpectStatus int `yaml:"expect_status,omitempty"`
+	// ExpectBodyContains, if set, must appear in the response body.
+	// {{revision}} stands for the deployed revision.
+	ExpectBodyContains string `yaml:"expect_body_contains,omitempty"`
+	// Timeout is how long to keep retrying. Default DefaultVerifyTimeout;
+	// an explicit 0 means a single attempt.
+	Timeout *Duration `yaml:"timeout,omitempty"`
+}
+
+// RetryFor returns how long the check keeps retrying.
+func (v *Verify) RetryFor() time.Duration {
+	if v.Timeout != nil {
+		return v.Timeout.Duration
+	}
+	return DefaultVerifyTimeout
+}
+
+func (v *Verify) applyDefaults() error {
+	u, err := url.Parse(strings.ReplaceAll(v.URL, RevisionPlaceholder, "x"))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url %q must be an http:// or https:// URL", v.URL)
+	}
+	if v.ExpectStatus == 0 {
+		v.ExpectStatus = 200
+	}
+	if v.ExpectStatus < 100 || v.ExpectStatus > 599 {
+		return fmt.Errorf("expect_status %d is not an HTTP status", v.ExpectStatus)
+	}
+	if v.Timeout != nil && v.Timeout.Duration < 0 {
+		return errors.New("timeout can't be negative")
+	}
+	return nil
 }
 
 // projectName is deliberately narrow: the agent uses it as a file name for
@@ -83,6 +137,12 @@ func (d *Deploy) applyDefaults(c *Config) error {
 			return fmt.Errorf("compose_file %q must be a path inside the project", d.ComposeFile)
 		}
 		d.ComposeFile = clean
+	}
+
+	for i := range d.Verify {
+		if err := d.Verify[i].applyDefaults(); err != nil {
+			return fmt.Errorf("verify[%d]: %w", i, err)
+		}
 	}
 
 	if len(d.Images) == 0 {

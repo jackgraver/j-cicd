@@ -92,7 +92,29 @@ deploy:
   project: my-project            # optional, default name: — the project in the agent's config
   images: [backend]              # optional, default all images: entries (by name)
   timeout: 10m                   # optional, default the top-level timeout
+  compose_file: deploy/compose.yaml   # optional: sent with the deploy
+  verify:                        # optional: checks of the live site after the deploy
+    - url: https://app.example.com/version.json
+      expect_body_contains: "{{revision}}"   # default: any body
+      expect_status: 200                      # default 200
+      timeout: 2m                             # keep retrying this long (default 2m; 0 = once)
 ```
+
+**Post-deploy verify.** The agent only knows the containers are healthy;
+`verify:` asks the public site (from the build host, the way users reach it)
+whether it's serving this release. After a successful deploy each check
+GETs its URL (with a cache-busting query parameter and `Cache-Control:
+no-cache`), retrying every 3s until the status and body match or its
+timeout passes. `{{revision}}` in the url or body is the deployed
+revision. A failure fails the run (recorded with `deployed: true`, since
+the release *is* running) and the error names `j-cicd rollback <name>`; it
+never rolls back by itself. It doesn't run without a deploy (`--no-push`,
+`--no-deploy`). The app must expose its commit somewhere for this to be
+useful: every step and docker command gets `J_CICD_REVISION` in its
+environment (the same revision the images are tagged with), so a step like
+`echo "{\"commit\":\"$J_CICD_REVISION\"}" > public/version.json` before the
+image build is enough. The path should be served with `Cache-Control:
+no-store` so a cache can't answer for it.
 
 Deploy sends each image's per-commit tag (`repo:<revision>`), never
 `latest`; the agent turns it into a digest (`repo@sha256:...`, the

@@ -279,3 +279,48 @@ func TestLoadBranch(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadVerifyDefaults(t *testing.T) {
+	cfg := loadOK(t, `
+name: d
+images: [{repository: r}]
+deploy:
+  host: h
+  verify:
+    - url: https://example.com/version.json
+      expect_body_contains: "{{revision}}"
+    - url: http://example.com/health
+      expect_status: 204
+      timeout: 0s
+`, "")
+	v := cfg.Deploy.Verify
+	if len(v) != 2 || v[0].ExpectStatus != 200 || v[0].RetryFor() != DefaultVerifyTimeout || v[0].ExpectBodyContains != RevisionPlaceholder {
+		t.Errorf("verify[0] = %+v", v[0])
+	}
+	if v[1].ExpectStatus != 204 || v[1].RetryFor() != 0 {
+		t.Errorf("verify[1] = %+v", v[1])
+	}
+}
+
+func TestLoadRejectsBadVerify(t *testing.T) {
+	cases := map[string]struct{ verify, want string }{
+		"no url":        {"- expect_status: 200", "verify[0]: url"},
+		"not http":      {"- url: ftp://example.com/x", "http:// or https://"},
+		"no host":       {"- url: https:///version.json", "http:// or https://"},
+		"bad status":    {"- url: https://e.com\n      expect_status: 999", "not an HTTP status"},
+		"negative wait": {"- url: https://e.com\n      timeout: -1s", "negative"},
+		"typo in a key": {"- url: https://e.com\n      expect_body: x", "expect_body"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := "name: d\nimages: [{repository: r}]\ndeploy:\n  host: h\n  verify:\n    " + tc.verify + "\n"
+			path := filepath.Join(t.TempDir(), DefaultFile)
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}

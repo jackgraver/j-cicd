@@ -306,11 +306,22 @@ func tailLinesOf(t *tailWriter) []string {
 // runnerFor is opts.Runner, else real processes writing to out. One
 // writer for both streams keeps stdout and stderr in the order they were
 // written.
-func runnerFor(opts Options, out io.Writer) pipeline.CommandRunner {
+func runnerFor(opts Options, out io.Writer, env ...string) pipeline.CommandRunner {
 	if opts.Runner != nil {
 		return opts.Runner
 	}
-	return pipeline.ExecRunner{Stdout: out, Stderr: out}
+	return pipeline.ExecRunner{Stdout: out, Stderr: out, Env: env}
+}
+
+// stepEnv is what every step and docker command gets on top of j-cicd's
+// own environment: J_CICD_REVISION, the revision the images are tagged
+// with, so a step can stamp it into what it builds (a version.json that a
+// deploy.verify check then looks for).
+func stepEnv(revision string) []string {
+	if revision == "" {
+		return nil
+	}
+	return []string{"J_CICD_REVISION=" + revision}
 }
 
 // prepared is a pipeline ready to run: the directory to run it in, its
@@ -383,7 +394,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Deploy:      opts.Deploy,
 		Revision:    revision,
 		DeployDirty: opts.DeployDirty,
-		Runner:      runnerFor(opts, env.out),
+		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
 		Logger:      env.log,
 		Progress:    env.stages,
 	})
