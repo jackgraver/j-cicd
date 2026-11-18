@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -43,6 +44,17 @@ Usage:
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
   j-cicd version               print the j-cicd version
 
+Output: at a terminal, run streams everything. Anywhere else (a pipe, a
+script, an agent) it prints one line per stage and, if something fails, the
+last lines of the failing command; -v streams everything, --quiet prints only
+the final status. The full output is always recorded: j-cicd logs <run-id>.
+--json (run, rollback, list, history) prints machine-readable results on
+stdout; prose and progress always go to stderr.
+
+Exit status: 0 success; 1 the pipeline (or rollback) failed or was cancelled;
+2 usage error; 3 config could not be loaded. Check it directly: in a pipeline
+like "j-cicd run x | tail", $? is tail's, not j-cicd's (use set -o pipefail).
+
 Every run is recorded under the state dir (`+"$"+store.HomeEnv+`, else
 $XDG_STATE_HOME/j-cicd, else ~/.local/state/j-cicd).
 Run "j-cicd <command> -h" for flags on a given command.
@@ -71,13 +83,19 @@ type runArgs struct {
 	deploy bool
 	// deployDirty allows deploying a build with uncommitted changes.
 	deployDirty bool
+	// verbose streams all command output; json prints the result as JSON
+	// on stdout.
+	verbose, json bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
 	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it (implies --no-deploy)")
-	quiet := fs.Bool("quiet", false, "don't echo the run's output (it's still recorded; see j-cicd logs)")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal; elsewhere only stage lines and a failure's last lines are shown)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout (run id, status, commit, pushed image digests)")
 	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
 	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
 
@@ -86,7 +104,8 @@ func parseRunArgs(args []string) (runArgs, error) {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty}
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty,
+		verbose: *verbose, json: *asJSON}
 	parsed.defaultPaths()
 	return parsed, nil
 }
@@ -135,17 +154,36 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty}
-	if !parsed.quiet {
-		opts.Echo = os.Stderr
-	}
+	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, parsed.json)
 	run, err := manager.Run(ctx, st, target, opts)
-	return reportRun(run, err, "pipeline failed")
+	return reportRun(run, err, "pipeline failed", parsed.json)
+}
+
+// outputMode picks what a foreground run shows on stderr. At a terminal
+// that's everything, as it happens. Anywhere else (a pipe, an agent, a
+// log file) it's the stage lines plus the end of whatever failed, since
+// thousands of docker layer lines bury the one that matters; -v brings
+// the full stream back and --quiet drops all of it. Either way the whole
+// output is recorded (j-cicd logs). --json is a script asking, so it gets
+// the concise form even at a terminal.
+func outputMode(quiet, verbose, asJSON bool) (echo, progress io.Writer) {
+	switch {
+	case quiet:
+		return nil, nil
+	case verbose || (!asJSON && isTerminal(os.Stderr)):
+		return os.Stderr, nil
+	default:
+		return nil, os.Stderr
+	}
 }
 
 func cmdRollback(args []string) error {
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
-	quiet := fs.Bool("quiet", false, "don't echo the rollback's output (it's still recorded; see j-cicd logs)")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -171,29 +209,60 @@ func cmdRollback(args []string) error {
 	defer stop()
 
 	opts := manager.Options{}
-	if !*quiet {
-		opts.Echo = os.Stderr
-	}
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
 	run, err := manager.Rollback(ctx, st, target, opts)
-	return reportRun(run, err, "rollback failed")
+	return reportRun(run, err, "rollback failed", *asJSON)
 }
 
-// reportRun logs how a recorded run ended and maps its error to an exit
-// code.
-func reportRun(run store.Run, err error, failed string) error {
+// reportRun says how a recorded run ended and maps its error to an exit
+// code. The prose goes to stderr; with asJSON the result is also printed
+// to stdout as JSON, even when the run failed, so a script always has one
+// object to parse (and the exit status to go with it).
+func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 	if run.ID != "" && run.Status.Done() {
-		log.Printf("run %s %s after %s (output: j-cicd logs %s)", run.ID, run.Status, display.Duration(run.Duration()), run.ID)
+		line := fmt.Sprintf("run %s %s after %s", run.ID, run.Status, display.Duration(run.Duration()))
+		if run.Revision != "" {
+			line += ", commit " + run.Revision
+		}
+		log.Printf("%s (output: j-cicd logs %s)", line, run.ID)
+		for _, img := range run.Images {
+			ref := img.Repository + ":" + strings.Join(img.Tags, ",")
+			if img.Digest != "" {
+				ref = img.Repository + "@" + img.Digest
+			}
+			log.Printf("  pushed %s: %s", img.Name, ref)
+		}
+		if run.Deployed {
+			log.Printf("  deployed to %s", run.DeployHost)
+		}
 	}
+
+	var result error
 	if err != nil {
-		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
-			return &exitError{code: exitConfig, err: err}
+		switch configErr := (*manager.ConfigError)(nil); {
+		case errors.As(err, &configErr):
+			result = &exitError{code: exitConfig, err: err}
+		case errors.Is(err, manager.ErrBusy):
+			result = err
+		default:
+			result = fmt.Errorf("%s: %w", failed, err)
 		}
-		if errors.Is(err, manager.ErrBusy) {
-			return err
-		}
-		return fmt.Errorf("%s: %w", failed, err)
 	}
-	return nil
+
+	if asJSON {
+		var out any
+		if run.ID != "" {
+			out = toJSONRun(run)
+		} else {
+			// Nothing was recorded (config didn't load, project busy):
+			// still one object, saying why.
+			out = map[string]string{"status": "error", "error": result.Error()}
+		}
+		if jsonErr := printJSON(out); jsonErr != nil && result == nil {
+			result = jsonErr
+		}
+	}
+	return result
 }
 
 // resolveRunTarget decides what `j-cicd run <x>` means. A bare word that

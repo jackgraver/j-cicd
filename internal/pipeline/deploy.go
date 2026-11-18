@@ -87,6 +87,7 @@ func (p *Pipeline) Rollback(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("%q has no deploy: section, so there is nothing to roll back", cfg.Name)
 	}
 	args := sshArgs(cfg.Deploy, "rollback")
+	p.say("rolling back on %s", cfg.Deploy.Host)
 	p.log.Printf("[rollback] ssh %s", strings.Join(args, " "))
 	if err := p.exec(ctx, cfg.DeployTimeout(DefaultTimeout), "", "ssh", args...); err != nil {
 		return fmt.Errorf("rollback on %s failed: %w", cfg.Deploy.Host, err)

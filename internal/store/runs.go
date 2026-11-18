@@ -47,16 +47,32 @@ type Run struct {
 	Dir    string `json:"dir"`
 	Config string `json:"config"`
 	// Revision is the git revision the run built ("" if not a git tree).
-	Revision   string    `json:"revision,omitempty"`
-	Push       bool      `json:"push"`
-	Status     Status    `json:"status"`
-	Error      string    `json:"error,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Revision string `json:"revision,omitempty"`
+	Push     bool   `json:"push"`
+	// Images are the images this run pushed, with the registry digest
+	// each resolved to; Deployed is whether the deploy stage then handed
+	// them to DeployHost. Both are empty for a run that didn't get that far.
+	Images     []RunImage `json:"images,omitempty"`
+	Deployed   bool       `json:"deployed,omitempty"`
+	DeployHost string     `json:"deploy_host,omitempty"`
+	Status     Status     `json:"status"`
+	Error      string     `json:"error,omitempty"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt time.Time  `json:"finished_at,omitzero"`
 	// PID is the j-cicd process executing the run. It's how a run that
 	// died without finishing is told apart from one still going, and what
 	// a UI signals to cancel it.
 	PID int `json:"pid"`
+}
+
+// RunImage is one image a run built and pushed.
+type RunImage struct {
+	Name       string   `json:"name"`
+	Repository string   `json:"repository"`
+	Tags       []string `json:"tags"`
+	// Digest is the registry's content hash for the push (sha256:...),
+	// "" if it couldn't be read back.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Duration is how long the run took, or has taken so far.

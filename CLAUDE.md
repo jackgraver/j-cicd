@@ -200,17 +200,19 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd add [project-dir] [--name n] [--config path]` — register a
   project. The config must load; the name defaults to the config's `name:`.
 - `j-cicd remove <name>` — unregister (history and files are kept).
-- `j-cicd list` — projects with their latest result.
+- `j-cicd list [--json]` — projects with their latest result.
 - `j-cicd run [name|project-dir] [--config path] [--no-push] [--no-deploy]
-  [--deploy-dirty] [--quiet]` —
+  [--deploy-dirty] [--json] [-v|--verbose] [--quiet]` —
   run a pipeline. A bare word that names a registered project runs it;
   anything path-like is a directory as before. A registered directory is
-  recorded under its registered name. `--quiet` only records output.
-- `j-cicd history [name] [-n count]` — recorded runs, newest first.
-- `j-cicd logs <run-id|name> [-f]` — a run's output (a name means its
-  latest run); `-f` follows it until it finishes.
+  recorded under its registered name. See **Output and agents** below for
+  `--json`, `-v` and `--quiet`.
+- `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
+- `j-cicd logs <run-id|name> [-f] [--tail N]` — a run's output (a name
+  means its latest run); `-f` follows it until it finishes, `--tail N`
+  prints only the last N lines.
 - `j-cicd cancel <run-id|name>` — stop a run in progress.
-- `j-cicd rollback [name|project-dir] [--config path] [--quiet]` — revert
+- `j-cicd rollback [name|project-dir] [--config path] [--json] [-v] [--quiet]` — revert
   the last deploy on the VPS via `j-cicd-agent rollback` over ssh, using
   the config's `deploy:` section. Recorded as a run of kind `rollback`.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
@@ -233,6 +235,33 @@ Flags work on either side of positional arguments. Unknown flags and stray
 positional arguments are errors rather than being ignored. Exit codes: 0 ok,
 1 pipeline failed, 2 usage error, 3 config could not be loaded — the same
 for both binaries.
+
+## Output and agents
+
+j-cicd is used by people at a terminal and by scripts and AI agents, so
+output depends on who is reading:
+
+- **At a terminal** (stderr is a TTY), `run` streams everything as it
+  happens, as before.
+- **Anywhere else** (a pipe, a script, an agent) it prints a concise
+  account to stderr: `run <id> started`, one `• step <name>` /
+  `• building image <x>` / `• pushing image <x>` / `• deploying to <host>`
+  line per stage, any warnings, and, if the run fails, the last 40 lines of
+  the *failing stage's* output. The full output is always recorded;
+  `j-cicd logs <id>` (or `--tail N`) gets it.
+- `-v`/`--verbose` forces the full stream; `--quiet` prints only the final
+  status line. `--json` implies the concise form unless `-v` is given.
+- A final stderr line gives the run id, commit, status, duration, the
+  registry digest of each pushed image and where it was deployed.
+- **`--json`** (`run`, `rollback`, `list`, `history`) prints machine-readable
+  results on stdout — for `run` one object with `id`, `status`, `error`,
+  `revision`, `images` (name, repository, tags, `digest`), `deployed`,
+  `deploy_host`, `duration_seconds` — even when the run failed. When nothing
+  was recorded (config error, project busy) it's `{"status":"error",...}`.
+  Stdout carries only data; prose and progress always go to stderr.
+- **Exit status**: 0 ok, 1 failed or cancelled, 2 usage, 3 config. It is
+  j-cicd's own only if it isn't piped (`| tail` replaces it with tail's;
+  use `set -o pipefail` or `--json`).
 
 ## State and history
 
@@ -272,7 +301,8 @@ builds without pushing.
     so deferred cleanup still runs and the future failure-investigation
     agent is reachable after a failure.
   - `commands.go` — CLI flag parsing per subcommand (`run`, `init`,
-    `version`), and all user-facing reporting for them.
+    `version`), and all user-facing reporting for them; `jsonout.go` is
+    the `--json` encoding.
 - `cmd/j-cicd-agent/` — `package main` for the VPS agent, same
   `main.go`/`app.go`/`commands.go` split and the same "only `app.go` exits"
   rule (so the deploy lock is always released).
@@ -304,6 +334,8 @@ builds without pushing.
   start, send all output to the run log (optionally echoed), record the
   outcome. Also `Launch` (detached background run) and `Cancel`.
   Every pipeline run, CLI or dashboard, goes through `manager.Run`.
+  `tail.go` keeps a failed stage's last lines
+  for concise output.
   `snapshot.go` resolves a release `branch:` and manages its worktree
   checkout (plain `git` via `os/exec`, like `detect`: it's repository
   plumbing, not a pipeline command, and its tests use real repos).
