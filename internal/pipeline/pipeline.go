@@ -73,6 +73,7 @@ type Pipeline struct {
 	// Results a caller can read once Run returns.
 	images   []ImageResult
 	deployed bool
+	verified []VerifyResult
 	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
 	// it; the real one probes the local socket.
 	inspectDocker func() dockerDiagnosis

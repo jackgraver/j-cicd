@@ -262,6 +262,9 @@ func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 		if run.Deployed {
 			log.Printf("  deployed to %s", run.DeployHost)
 		}
+		for _, v := range run.Verified {
+			log.Printf("  verified %s (%d attempt(s), %.1fs)", v.URL, v.Attempts, v.Seconds)
+		}
 	}
 
 	var result error

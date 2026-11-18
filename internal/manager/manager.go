@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
@@ -401,6 +402,9 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 	err := p.Run(ctx, cfg)
 	for _, img := range p.Images() {
 		env.run.Images = append(env.run.Images, store.RunImage{Name: img.Name, Repository: img.Repository, Tags: img.Tags, Digest: img.Digest})
+	}
+	for _, v := range p.Verified() {
+		env.run.Verified = append(env.run.Verified, store.RunVerify{URL: v.URL, Attempts: v.Attempts, Seconds: v.Duration.Round(100 * time.Millisecond).Seconds()})
 	}
 	if p.Deployed() {
 		env.run.Deployed, env.run.DeployHost = true, cfg.Deploy.Host

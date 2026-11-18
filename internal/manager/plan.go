@@ -27,7 +27,13 @@ type Plan struct {
 	Dirty    bool   `json:"dirty,omitempty"`
 	// Busy is the ID of a run already in progress, which this one would
 	// have to wait out or be refused for.
-	Busy     string   `json:"busy_run,omitempty"`
+	Busy string `json:"busy_run,omitempty"`
+	// Upstream is what the built branch tracks ("" if nothing), and
+	// Ahead/Behind how many commits it differs by, as of the last fetch.
+	// j-cicd builds the local branch whatever these say.
+	Upstream string   `json:"upstream,omitempty"`
+	Ahead    int      `json:"ahead,omitempty"`
+	Behind   int      `json:"behind,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 	pipeline.Plan
 }
@@ -38,11 +44,17 @@ func (p *Plan) Describe() string {
 	fmt.Fprintf(&b, "plan for %q (nothing was run)\n", p.Project)
 	switch {
 	case p.Branch != "" && p.Revision != "":
-		fmt.Fprintf(&b, "  source:  local branch %s at %s, from a clean checkout\n", p.Branch, p.Revision)
+		fmt.Fprintf(&b, "  source:  local branch %s at %s, from a clean checkout (not origin's copy)\n", p.Branch, p.Revision)
 	case p.Revision != "":
 		fmt.Fprintf(&b, "  source:  %s as it is on disk, revision %s\n", p.Dir, p.Revision)
 	default:
 		fmt.Fprintf(&b, "  source:  %s as it is on disk (no git revision)\n", p.Dir)
+	}
+	switch {
+	case p.Upstream == "" && p.Revision != "":
+		fmt.Fprintf(&b, "  sync:    no upstream configured, so there is nothing to compare the local commit with\n")
+	case p.Upstream != "" && p.Ahead == 0 && p.Behind == 0:
+		fmt.Fprintf(&b, "  sync:    in sync with %s (as of the last fetch)\n", p.Upstream)
 	}
 	for i, s := range p.Steps {
 		fmt.Fprintf(&b, "  step %d:  %s: %s\n", i+1, s.Name, s.Run)
@@ -109,8 +121,11 @@ func MakePlan(ctx context.Context, st *store.Store, t Target, opts Options) (*Pl
 		plan.Branch, plan.Revision, ref = rel.branch, rel.revision, rel.branch
 	}
 	plan.Dirty = rel == nil && strings.HasSuffix(plan.Revision, "-dirty")
-	if note := syncWarning(ctx, dir, ref); note != "" {
-		plan.Warnings = append(plan.Warnings, note)
+	if s, ok := upstreamSync(ctx, dir, ref); ok {
+		plan.Upstream, plan.Ahead, plan.Behind = s.Upstream, s.Ahead, s.Behind
+		if note := formatSync(refName(ref), s.Upstream, s.Ahead, s.Behind); note != "" {
+			plan.Warnings = append(plan.Warnings, note)
+		}
 	}
 
 	env := &runEnv{out: io.Discard, log: log.New(io.Discard, "", 0), run: &store.Run{}}

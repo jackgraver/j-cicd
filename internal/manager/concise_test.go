@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,5 +224,69 @@ func TestStepsGetRevisionInEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(echo.String(), "stamped-"+mainRev+"\n") {
 		t.Errorf("output:\n%s", echo.String())
+	}
+}
+
+func TestPlanSyncFields(t *testing.T) {
+	st, target, _ := releaseRepo(t)
+
+	// No upstream: the plan says there is nothing to compare with.
+	plan, err := MakePlan(context.Background(), st, target, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Upstream != "" || !strings.Contains(plan.Describe(), "no upstream configured") || !strings.Contains(plan.Describe(), "not origin's copy") {
+		t.Errorf("no-upstream plan:\n%s", plan.Describe())
+	}
+
+	// In sync with origin.
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	gitT(t, target.Dir, "init", "-q", "--bare", origin)
+	gitT(t, target.Dir, "remote", "add", "origin", origin)
+	gitT(t, target.Dir, "push", "-q", "origin", "main")
+	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	plan, _ = MakePlan(context.Background(), st, target, Options{})
+	if plan.Upstream != "origin/main" || plan.Ahead != 0 || !strings.Contains(plan.Describe(), "in sync with origin/main") {
+		t.Errorf("in-sync plan:\n%s", plan.Describe())
+	}
+
+	// One unpushed commit on main.
+	gitT(t, target.Dir, "checkout", "-q", "main")
+	write(t, filepath.Join(target.Dir, "more.txt"), "x\n")
+	gitT(t, target.Dir, "add", "more.txt")
+	gitT(t, target.Dir, "commit", "-q", "-m", "unpushed")
+	plan, _ = MakePlan(context.Background(), st, target, Options{})
+	if plan.Ahead != 1 || plan.Behind != 0 || len(plan.Warnings) != 1 {
+		t.Errorf("ahead plan = %+v", plan)
+	}
+}
+
+// --plan --json is one object an agent can show as it is: the embedded
+// pipeline plan is flattened into it, and sync state is named.
+func TestPlanJSONShape(t *testing.T) {
+	st, target, mainRev := releaseRepo(t)
+	plan, err := MakePlan(context.Background(), st, target, Options{Push: true, Deploy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"project", "dir", "branch", "revision", "steps", "images", "deploy"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("plan JSON has no %q: %s", key, data)
+		}
+	}
+	if got["revision"] != mainRev || got["branch"] != "main" {
+		t.Errorf("plan JSON = %s", data)
+	}
+	deploy := got["deploy"].(map[string]any)
+	if deploy["host"] != "vps" {
+		t.Errorf("deploy = %v", deploy)
 	}
 }

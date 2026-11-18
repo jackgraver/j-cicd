@@ -52,17 +52,27 @@ type Run struct {
 	// Images are the images this run pushed, with the registry digest
 	// each resolved to; Deployed is whether the deploy stage then handed
 	// them to DeployHost. Both are empty for a run that didn't get that far.
-	Images     []RunImage `json:"images,omitempty"`
-	Deployed   bool       `json:"deployed,omitempty"`
-	DeployHost string     `json:"deploy_host,omitempty"`
-	Status     Status     `json:"status"`
-	Error      string     `json:"error,omitempty"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt time.Time  `json:"finished_at,omitzero"`
+	Images   []RunImage `json:"images,omitempty"`
+	Deployed bool       `json:"deployed,omitempty"`
+	// Verified are the post-deploy checks that passed.
+	Verified   []RunVerify `json:"verified,omitempty"`
+	DeployHost string      `json:"deploy_host,omitempty"`
+	Status     Status      `json:"status"`
+	Error      string      `json:"error,omitempty"`
+	StartedAt  time.Time   `json:"started_at"`
+	FinishedAt time.Time   `json:"finished_at,omitzero"`
 	// PID is the j-cicd process executing the run. It's how a run that
 	// died without finishing is told apart from one still going, and what
 	// a UI signals to cancel it.
 	PID int `json:"pid"`
+}
+
+// RunVerify is a post-deploy check that passed: how many requests it took
+// and how long, until the site served the new release.
+type RunVerify struct {
+	URL      string  `json:"url"`
+	Attempts int     `json:"attempts"`
+	Seconds  float64 `json:"seconds"`
 }
 
 // RunImage is one image a run built and pushed.

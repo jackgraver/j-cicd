@@ -108,7 +108,8 @@ no-cache`), retrying every 3s until the status and body match or its
 timeout passes. `{{revision}}` in the url or body is the deployed
 revision. A failure fails the run (recorded with `deployed: true`, since
 the release *is* running) and the error names `j-cicd rollback <name>`; it
-never rolls back by itself. It doesn't run without a deploy (`--no-push`,
+never rolls back by itself. Each passed check is reported with how many attempts and seconds it took
+(the log, the concise output, and `verified` in the run's JSON). It doesn't run without a deploy (`--no-push`,
 `--no-deploy`). The app must expose its commit somewhere for this to be
 useful: every step and docker command gets `J_CICD_REVISION` in its
 environment (the same revision the images are tagged with), so a step like
@@ -290,11 +291,15 @@ output depends on who is reading:
   checks out a release branch into a throwaway worktree to read the config
   and compose file as committed. A run that would be refused (dirty tree,
   no per-commit tag) lists a PROBLEM and exits 1.
+  `--plan --json` is one object: `project`, `branch`, `revision`, `steps`,
+  `images`, `deploy` (host, refs, `verify` URLs), `skipped`, `warnings`,
+  `problems`, and `upstream`/`ahead`/`behind`.
 - **Local vs. origin**: j-cicd always builds the *local* branch (the
   release `branch:`, or the checked-out one), and says so. If it's ahead of,
   behind, or diverged from its upstream (as of the last fetch; j-cicd never
   touches the network for this) it warns, in the run, the plan and the
-  concise output.
+  concise output. The plan always states
+  the relationship: in sync, ahead/behind, or no upstream to compare with.
 
 ## State and history
 

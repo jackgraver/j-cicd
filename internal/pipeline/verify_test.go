@@ -51,8 +51,17 @@ func TestVerifyRetriesUntilTheNewReleaseIsServed(t *testing.T) {
 	defer srv.Close()
 
 	runner := &fakeRunner{}
-	if err := verifyPipeline(runner).Run(context.Background(), verifyConfig(t, srv.URL+"/version.json", "10s")); err != nil {
+	var progress strings.Builder
+	p := verifyPipeline(runner)
+	p.progress = &progress
+	if err := p.Run(context.Background(), verifyConfig(t, srv.URL+"/version.json", "10s")); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if v := p.Verified(); len(v) != 1 || v[0].Attempts != 3 || v[0].Duration <= 0 {
+		t.Errorf("Verified = %+v, want one check that took 3 attempts", v)
+	}
+	if !strings.Contains(progress.String(), "• verified "+srv.URL+"/version.json (3 attempts, ") {
+		t.Errorf("progress = %q", progress.String())
 	}
 	if hits.Load() != 3 {
 		t.Errorf("requests = %d, want 3", hits.Load())

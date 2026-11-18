@@ -16,6 +16,23 @@ import (
 // DefaultVerifyInterval is the pause between attempts of a verify check.
 const DefaultVerifyInterval = 3 * time.Second
 
+// VerifyResult is a verify check that passed.
+type VerifyResult struct {
+	URL      string
+	Attempts int
+	Duration time.Duration
+}
+
+// Verified returns the checks the last Run passed.
+func (p *Pipeline) Verified() []VerifyResult { return p.verified }
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 func expandRevision(s, revision string) string {
 	return strings.ReplaceAll(s, config.RevisionPlaceholder, revision)
 }
@@ -29,11 +46,16 @@ func (p *Pipeline) verify(ctx context.Context, cfg *config.Config) error {
 		v := &cfg.Deploy.Verify[i]
 		target := expandRevision(v.URL, p.revision)
 		p.say("verifying %s", target)
+		started := time.Now()
 		p.log.Printf("[verify] GET %s (expect status %d%s)", target, v.ExpectStatus, expectation(v, p.revision))
-		if err := p.verifyOne(ctx, v, target); err != nil {
+		attempts, err := p.verifyOne(ctx, v, target)
+		if err != nil {
 			return fmt.Errorf("verify %s failed: %w", target, err)
 		}
-		p.log.Printf("[verify] %s is serving revision %s", target, p.revision)
+		took := time.Since(started)
+		p.verified = append(p.verified, VerifyResult{URL: target, Attempts: attempts, Duration: took})
+		p.log.Printf("[verify] %s is serving revision %s (%s, %s)", target, p.revision, plural(attempts, "attempt"), took.Round(time.Millisecond))
+		p.say("verified %s (%s, %s)", target, plural(attempts, "attempt"), took.Round(100*time.Millisecond))
 	}
 	return nil
 }
@@ -46,26 +68,27 @@ func expectation(v *config.Verify, revision string) string {
 }
 
 // verifyOne retries one check until it passes or its timeout expires.
-func (p *Pipeline) verifyOne(ctx context.Context, v *config.Verify, target string) error {
+// It returns how many requests it took.
+func (p *Pipeline) verifyOne(ctx context.Context, v *config.Verify, target string) (int, error) {
 	retryFor := v.RetryFor()
 	deadline := time.Now().Add(retryFor)
 	var last string
 	for attempt := 1; ; attempt++ {
 		ok, detail, err := p.checkOnce(ctx, v, target)
 		if err != nil {
-			return err // cancelled
+			return attempt, err // cancelled
 		}
 		if ok {
-			return nil
+			return attempt, nil
 		}
 		last = detail
 		if !time.Now().Add(p.verifyEvery).Before(deadline) {
-			return fmt.Errorf("still not serving this release after %d attempt(s) over %s: %s", attempt, retryFor, last)
+			return attempt, fmt.Errorf("still not serving this release after %d attempt(s) over %s: %s", attempt, retryFor, last)
 		}
 		p.log.Printf("[verify] attempt %d: %s; retrying", attempt, last)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return attempt, ctx.Err()
 		case <-time.After(p.verifyEvery):
 		}
 	}

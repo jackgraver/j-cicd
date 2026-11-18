@@ -120,23 +120,42 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 // touches the network for this. "" means in sync, or no upstream to
 // compare with.
 func syncWarning(ctx context.Context, dir, ref string) string {
+	s, ok := upstreamSync(ctx, dir, ref)
+	if !ok {
+		return ""
+	}
+	return formatSync(refName(ref), s.Upstream, s.Ahead, s.Behind)
+}
+
+// syncStatus is how a local ref stands against its upstream.
+type syncStatus struct {
+	Upstream      string
+	Ahead, Behind int
+}
+
+// upstreamSync compares ref with its configured upstream as of the last
+// fetch. ok is false when there's no upstream to compare with.
+func upstreamSync(ctx context.Context, dir, ref string) (syncStatus, bool) {
 	upstream, err := git(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", ref+"@{upstream}")
 	if err != nil {
-		return ""
+		return syncStatus{}, false
 	}
 	counts, err := git(ctx, dir, "rev-list", "--left-right", "--count", ref+"..."+upstream)
 	if err != nil {
-		return ""
+		return syncStatus{}, false
 	}
-	var ahead, behind int
-	if _, err := fmt.Sscanf(counts, "%d %d", &ahead, &behind); err != nil {
-		return ""
+	s := syncStatus{Upstream: upstream}
+	if _, err := fmt.Sscanf(counts, "%d %d", &s.Ahead, &s.Behind); err != nil {
+		return syncStatus{}, false
 	}
-	name := ref
+	return s, true
+}
+
+func refName(ref string) string {
 	if ref == "HEAD" {
-		name = "the checked-out branch"
+		return "the checked-out branch"
 	}
-	return formatSync(name, upstream, ahead, behind)
+	return ref
 }
 
 func formatSync(name, upstream string, ahead, behind int) string {
