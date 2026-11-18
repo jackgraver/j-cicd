@@ -202,11 +202,11 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd remove <name>` — unregister (history and files are kept).
 - `j-cicd list [--json]` — projects with their latest result.
 - `j-cicd run [name|project-dir] [--config path] [--no-push] [--no-deploy]
-  [--deploy-dirty] [--json] [-v|--verbose] [--quiet]` —
+  [--deploy-dirty] [--plan] [--json] [-v|--verbose] [--quiet]` —
   run a pipeline. A bare word that names a registered project runs it;
   anything path-like is a directory as before. A registered directory is
   recorded under its registered name. See **Output and agents** below for
-  `--json`, `-v` and `--quiet`.
+  `--plan`, `--json`, `-v` and `--quiet`.
 - `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
 - `j-cicd logs <run-id|name> [-f] [--tail N]` — a run's output (a name
   means its latest run); `-f` follows it until it finishes, `--tail N`
@@ -262,6 +262,17 @@ output depends on who is reading:
 - **Exit status**: 0 ok, 1 failed or cancelled, 2 usage, 3 config. It is
   j-cicd's own only if it isn't piped (`| tail` replaces it with tail's;
   use `set -o pipefail` or `--json`).
+- **`run --plan`** works out what a run would do — the commit, steps,
+  images with tags, deploy host and refs, warnings — without running a
+  step, building, pushing, deploying or recording a run (`--json` too). It
+  checks out a release branch into a throwaway worktree to read the config
+  and compose file as committed. A run that would be refused (dirty tree,
+  no per-commit tag) lists a PROBLEM and exits 1.
+- **Local vs. origin**: j-cicd always builds the *local* branch (the
+  release `branch:`, or the checked-out one), and says so. If it's ahead of,
+  behind, or diverged from its upstream (as of the last fetch; j-cicd never
+  touches the network for this) it warns, in the run, the plan and the
+  concise output.
 
 ## State and history
 
@@ -334,7 +345,7 @@ builds without pushing.
   start, send all output to the run log (optionally echoed), record the
   outcome. Also `Launch` (detached background run) and `Cancel`.
   Every pipeline run, CLI or dashboard, goes through `manager.Run`.
-  `tail.go` keeps a failed stage's last lines
+  `plan.go` is `run --plan`; `tail.go` keeps a failed stage's last lines
   for concise output.
   `snapshot.go` resolves a release `branch:` and manages its worktree
   checkout (plain `git` via `os/exec`, like `detect`: it's repository

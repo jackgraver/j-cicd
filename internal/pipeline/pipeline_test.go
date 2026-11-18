@@ -286,3 +286,28 @@ func TestRunProgressLines(t *testing.T) {
 		t.Error("Deployed = false after a deploy")
 	}
 }
+
+func TestPlan(t *testing.T) {
+	cfg := deployConfig(t, &config.Deploy{Host: "deploy@vps"})
+	runner := &fakeRunner{}
+	p := New("/proj", Options{Push: true, Deploy: true, Revision: rev, Runner: runner})
+	plan := p.Plan(cfg)
+	if len(plan.Steps) != 1 || len(plan.Images) != 2 || !plan.Images[0].Push {
+		t.Errorf("plan = %+v", plan)
+	}
+	if plan.Deploy == nil || plan.Deploy.Host != "deploy@vps" || len(plan.Deploy.Images) != 2 || len(plan.Problems) != 0 {
+		t.Errorf("deploy = %+v, problems %v", plan.Deploy, plan.Problems)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("planning ran %q", runner.calls)
+	}
+
+	dirty := New("/proj", Options{Push: true, Deploy: true, Revision: rev + "-dirty"}).Plan(cfg)
+	if dirty.Deploy != nil || len(dirty.Problems) != 1 || !strings.Contains(dirty.Problems[0], "uncommitted") {
+		t.Errorf("dirty plan = %+v", dirty)
+	}
+	skip := New("/proj", Options{Push: true, Revision: rev}).Plan(cfg)
+	if skip.Deploy != nil || len(skip.Skipped) != 1 || len(skip.Problems) != 0 {
+		t.Errorf("--no-deploy plan = %+v", skip)
+	}
+}

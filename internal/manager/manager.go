@@ -108,6 +108,14 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		}
 	}
 
+	// How the built commit relates to its remote, so nobody has to guess
+	// whether "main" meant the local branch or origin's.
+	ref := "HEAD"
+	if rel != nil {
+		ref = rel.branch
+	}
+	syncNote := syncWarning(ctx, dir, ref)
+
 	return record(ctx, st, store.Run{
 		Project:  t.Name,
 		Dir:      dir,
@@ -120,6 +128,9 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		}
 		if relErr != nil {
 			return relErr
+		}
+		if syncNote != "" {
+			env.warnf("%s", syncNote)
 		}
 		return prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, env)
 	})
@@ -201,11 +212,15 @@ type runEnv struct {
 	// failure's tail is that stage's output alone. nil without progress.
 	stages io.Writer
 	run    *store.Run
+	// warnings collects every warnf, for callers that report them
+	// themselves (Plan).
+	warnings []string
 }
 
 // warnf records a warning in the log and, in concise mode, on the
 // progress stream, where it would otherwise be lost among hidden output.
 func (e *runEnv) warnf(format string, args ...any) {
+	e.warnings = append(e.warnings, fmt.Sprintf(format, args...))
 	e.log.Printf("warning: "+format, args...)
 	if e.progress != nil {
 		fmt.Fprintf(e.progress, "warning: "+format+"\n", args...)
@@ -298,27 +313,37 @@ func runnerFor(opts Options, out io.Writer) pipeline.CommandRunner {
 	return pipeline.ExecRunner{Stdout: out, Stderr: out}
 }
 
-// prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
-// fresh snapshot of the release commit that is removed afterwards.
-func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revision string, rel *release, opts Options, env *runEnv) error {
+// prepared is a pipeline ready to run: the directory to run it in, its
+// config, and how to clean up (remove the snapshot, if there is one).
+type prepared struct {
+	dir     string
+	cfg     *config.Config
+	cleanup func()
+}
+
+// prepare resolves what a run builds. Without a release it's the project
+// directory and its config. With one it's a fresh snapshot of the release
+// commit, with the config as committed there. snapDir is where the
+// snapshot goes.
+func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel *release, env *runEnv) (*prepared, error) {
 	if rel == nil {
 		cfg, err := config.Load(configPath, revision)
 		if err != nil {
-			return &ConfigError{Err: err}
+			return nil, &ConfigError{Err: err}
 		}
-		return execute(ctx, dir, cfg, revision, opts, env)
+		return &prepared{dir: dir, cfg: cfg, cleanup: func() {}}, nil
 	}
 
-	env.log.Printf("building branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
-	snap, err := createSnapshot(ctx, root, project, dir, rel)
+	env.log.Printf("building the local branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
+	snap, err := createSnapshot(ctx, snapDir, dir, rel)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() {
+	cleanup := func() {
 		if err := snap.remove(); err != nil {
 			env.warnf("couldn't remove snapshot %s: %v", snap.dir, err)
 		}
-	}()
+	}
 	buildDir := filepath.Join(snap.dir, rel.prefix)
 
 	// The config is part of what's released, so it comes from the commit
@@ -326,17 +351,30 @@ func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revi
 	if inside, err := filepath.Rel(dir, configPath); err == nil && inside != ".." && !strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
 		configPath = filepath.Join(buildDir, inside)
 		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-			return &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
+			cleanup()
+			return nil, &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
 		}
 	}
 	cfg, err := config.Load(configPath, revision)
 	if err != nil {
-		return &ConfigError{Err: err}
+		cleanup()
+		return nil, &ConfigError{Err: err}
 	}
 	if cfg.Branch != rel.branch {
 		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
 	}
-	return execute(ctx, buildDir, cfg, revision, opts, env)
+	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil
+}
+
+// prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
+// fresh snapshot of the release commit that is removed afterwards.
+func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revision string, rel *release, opts Options, env *runEnv) error {
+	prep, err := prepare(ctx, snapshotDir(root, project), dir, configPath, revision, rel, env)
+	if err != nil {
+		return err
+	}
+	defer prep.cleanup()
+	return execute(ctx, prep.dir, prep.cfg, revision, opts, env)
 }
 
 func execute(ctx context.Context, dir string, cfg *config.Config, revision string, opts Options, env *runEnv) error {

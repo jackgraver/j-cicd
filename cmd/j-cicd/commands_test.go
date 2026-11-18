@@ -163,11 +163,11 @@ func TestAppStartExitCodes(t *testing.T) {
 }
 
 func TestParseRunArgsOutputFlags(t *testing.T) {
-	got, err := parseRunArgs([]string{"app", "--json", "-v"})
+	got, err := parseRunArgs([]string{"app", "--json", "-v", "--plan"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.json || !got.verbose || got.quiet {
+	if !got.json || !got.verbose || !got.plan || got.quiet {
 		t.Errorf("parsed = %+v", got)
 	}
 }

@@ -157,7 +157,7 @@ func TestReleaseBranchBuildsCommittedBranchNotWorkingTree(t *testing.T) {
 		t.Errorf("uncommitted file was disturbed: %v", err)
 	}
 	log, _ := os.ReadFile(st.LogPath(run.ID))
-	if !strings.Contains(string(log), "building branch main at "+mainRev) {
+	if !strings.Contains(string(log), "building the local branch main at "+mainRev) {
 		t.Errorf("log doesn't say what it built:\n%s", log)
 	}
 }

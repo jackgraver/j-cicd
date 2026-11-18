@@ -3,8 +3,11 @@ package manager
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"j-cicd/internal/store"
 )
 
 func TestTailWriterKeepsLastLines(t *testing.T) {
@@ -92,6 +95,104 @@ deploy:
 	if len(got.Images) != 1 || got.Images[0].Repository != "registry.example.com/app" || got.Deployed {
 		t.Errorf("recorded run = %+v", got)
 	}
+}
+
+func TestFormatSync(t *testing.T) {
+	cases := []struct {
+		ahead, behind int
+		want          string
+	}{
+		{0, 0, ""},
+		{1, 0, "local main is 1 commit ahead of origin/main (not pushed)"},
+		{3, 0, "3 commits ahead"},
+		{0, 2, "2 commits behind"},
+		{1, 1, "has diverged"},
+	}
+	for _, tc := range cases {
+		got := formatSync("main", "origin/main", tc.ahead, tc.behind)
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("formatSync(%d,%d) = %q, want it to contain %q", tc.ahead, tc.behind, got, tc.want)
+		}
+	}
+}
+
+// releaseRepo plus a bare "origin" that main is 1 commit ahead of.
+func TestUnpushedReleaseCommitWarns(t *testing.T) {
+	st, target, _ := releaseRepo(t)
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	gitT(t, target.Dir, "init", "-q", "--bare", origin)
+	gitT(t, target.Dir, "remote", "add", "origin", origin)
+	gitT(t, target.Dir, "push", "-q", "origin", "main")
+	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	gitT(t, target.Dir, "checkout", "-q", "main")
+	write(t, filepath.Join(target.Dir, "more.txt"), "unpushed\n")
+	gitT(t, target.Dir, "add", "more.txt")
+	gitT(t, target.Dir, "commit", "-q", "-m", "unpushed")
+
+	run, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := os.ReadFile(st.LogPath(run.ID))
+	if !strings.Contains(string(log), "warning: local main is 1 commit ahead of origin/main") {
+		t.Errorf("log has no unpushed warning:\n%s", log)
+	}
+
+	plan, err := MakePlan(context.Background(), st, target, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "ahead of origin/main") {
+		t.Errorf("plan warnings = %q", plan.Warnings)
+	}
+}
+
+func TestPlanRunsNothingAndRecordsNothing(t *testing.T) {
+	st, target, mainRev := releaseRepo(t)
+	plan, err := MakePlan(context.Background(), st, target, Options{Push: true, Deploy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Branch != "main" || plan.Revision != mainRev || plan.Dirty {
+		t.Errorf("plan source = %+v, want main at %s", plan, mainRev)
+	}
+	// The committed config's step, not the edited working copy's.
+	if len(plan.Steps) != 1 || plan.Steps[0].Run != "make release-test" {
+		t.Errorf("steps = %+v", plan.Steps)
+	}
+	if plan.Deploy == nil || plan.Deploy.Host != "vps" || len(plan.Deploy.Images) != 1 || !strings.HasSuffix(plan.Deploy.Images[0], ":"+mainRev) {
+		t.Errorf("deploy = %+v", plan.Deploy)
+	}
+	if runs, _ := st.Runs("", 0); len(runs) != 0 {
+		t.Errorf("a plan recorded runs: %+v", runs)
+	}
+	if wts := gitT(t, target.Dir, "worktree", "list"); strings.Count(wts, "\n") != 0 {
+		t.Errorf("plan left a worktree:\n%s", wts)
+	}
+	if !strings.Contains(plan.Describe(), "local branch main at "+mainRev) {
+		t.Errorf("Describe:\n%s", plan.Describe())
+	}
+}
+
+func TestPlanReportsRefusedDeploy(t *testing.T) {
+	st, target := setup(t, "name: app\nimages:\n  - repository: r.example.com/app\ndeploy:\n  host: vps\n")
+	plan, err := MakePlan(context.Background(), st, target, Options{Push: true, Deploy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Problems) != 1 || !strings.Contains(plan.Problems[0], "cannot deploy") || plan.Deploy != nil {
+		t.Errorf("plan = %+v, want the deploy refused (no git revision)", plan)
+	}
+}
+
+func TestPlanBadConfig(t *testing.T) {
+	st, target := setup(t, "name: app\nstepz: []\n")
+	if _, err := MakePlan(context.Background(), st, target, Options{}); err == nil {
+		t.Fatal("want a config error")
+	} else if _, ok := err.(*ConfigError); !ok {
+		t.Errorf("err = %T %v, want *ConfigError", err, err)
+	}
+	_ = store.StatusFailed
 }
 
 // Output of an earlier, passing step isn't part of a later step's failure.

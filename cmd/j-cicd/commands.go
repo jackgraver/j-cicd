@@ -49,7 +49,8 @@ script, an agent) it prints one line per stage and, if something fails, the
 last lines of the failing command; -v streams everything, --quiet prints only
 the final status. The full output is always recorded: j-cicd logs <run-id>.
 --json (run, rollback, list, history) prints machine-readable results on
-stdout; prose and progress always go to stderr.
+stdout; prose and progress always go to stderr. run --plan shows what would
+happen without doing it.
 
 Exit status: 0 success; 1 the pipeline (or rollback) failed or was cancelled;
 2 usage error; 3 config could not be loaded. Check it directly: in a pipeline
@@ -84,8 +85,8 @@ type runArgs struct {
 	// deployDirty allows deploying a build with uncommitted changes.
 	deployDirty bool
 	// verbose streams all command output; json prints the result as JSON
-	// on stdout.
-	verbose, json bool
+	// on stdout; plan only reports what would happen.
+	verbose, json, plan bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
@@ -96,6 +97,7 @@ func parseRunArgs(args []string) (runArgs, error) {
 	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal; elsewhere only stage lines and a failure's last lines are shown)")
 	fs.BoolVar(verbose, "v", false, "same as --verbose")
 	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout (run id, status, commit, pushed image digests)")
+	plan := fs.Bool("plan", false, "show what would run (commit, steps, images, deploy host) without running, building, pushing or deploying")
 	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
 	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
 
@@ -105,7 +107,7 @@ func parseRunArgs(args []string) (runArgs, error) {
 	}
 
 	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty,
-		verbose: *verbose, json: *asJSON}
+		verbose: *verbose, json: *asJSON, plan: *plan}
 	parsed.defaultPaths()
 	return parsed, nil
 }
@@ -154,6 +156,9 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty}
+	if parsed.plan {
+		return cmdPlan(ctx, st, target, opts, parsed.json)
+	}
 	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, parsed.json)
 	run, err := manager.Run(ctx, st, target, opts)
 	return reportRun(run, err, "pipeline failed", parsed.json)
@@ -175,6 +180,28 @@ func outputMode(quiet, verbose, asJSON bool) (echo, progress io.Writer) {
 	default:
 		return nil, os.Stderr
 	}
+}
+
+// cmdPlan is `run --plan`: report what the run would do, touching nothing.
+func cmdPlan(ctx context.Context, st *store.Store, target manager.Target, opts manager.Options, asJSON bool) error {
+	plan, err := manager.MakePlan(ctx, st, target, opts)
+	if err != nil {
+		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
+			err = &exitError{code: exitConfig, err: err}
+		}
+		return err
+	}
+	if asJSON {
+		if err := printJSON(plan); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(plan.Describe())
+	}
+	if len(plan.Problems) > 0 {
+		return fmt.Errorf("this run would fail: %s", strings.Join(plan.Problems, "; "))
+	}
+	return nil
 }
 
 func cmdRollback(args []string) error {

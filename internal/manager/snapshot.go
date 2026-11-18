@@ -59,10 +59,10 @@ func snapshotDir(root, project string) string {
 	return filepath.Join(root, "snapshots", project)
 }
 
-// createSnapshot checks rel.commit out at snapshotDir(root, project). A
-// leftover from a run that was killed before cleaning up is removed first.
-func createSnapshot(ctx context.Context, root, project, repo string, rel *release) (*snapshot, error) {
-	s := &snapshot{repo: repo, dir: snapshotDir(root, project)}
+// createSnapshot checks rel.commit out at dir. A leftover from a run that
+// was killed before cleaning up is removed first.
+func createSnapshot(ctx context.Context, dir, repo string, rel *release) (*snapshot, error) {
+	s := &snapshot{repo: repo, dir: dir}
 	if err := s.remove(); err != nil {
 		return nil, fmt.Errorf("removing stale snapshot %s: %w", s.dir, err)
 	}
@@ -112,4 +112,47 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", args[0], err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// syncWarning says how ref (a local branch, or "HEAD") stands against its
+// upstream, so it's never a guess whether a build includes commits that
+// haven't been pushed. It compares against the last fetch; j-cicd never
+// touches the network for this. "" means in sync, or no upstream to
+// compare with.
+func syncWarning(ctx context.Context, dir, ref string) string {
+	upstream, err := git(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", ref+"@{upstream}")
+	if err != nil {
+		return ""
+	}
+	counts, err := git(ctx, dir, "rev-list", "--left-right", "--count", ref+"..."+upstream)
+	if err != nil {
+		return ""
+	}
+	var ahead, behind int
+	if _, err := fmt.Sscanf(counts, "%d %d", &ahead, &behind); err != nil {
+		return ""
+	}
+	name := ref
+	if ref == "HEAD" {
+		name = "the checked-out branch"
+	}
+	return formatSync(name, upstream, ahead, behind)
+}
+
+func formatSync(name, upstream string, ahead, behind int) string {
+	plural := func(n int) string {
+		if n == 1 {
+			return "1 commit"
+		}
+		return fmt.Sprintf("%d commits", n)
+	}
+	switch {
+	case ahead > 0 && behind > 0:
+		return fmt.Sprintf("local %s has diverged from %s (%s ahead, %s behind, as of the last fetch); j-cicd builds the local one", name, upstream, plural(ahead), plural(behind))
+	case ahead > 0:
+		return fmt.Sprintf("local %s is %s ahead of %s (not pushed); j-cicd builds the local one, so those commits are included", name, plural(ahead), upstream)
+	case behind > 0:
+		return fmt.Sprintf("local %s is %s behind %s (as of the last fetch); j-cicd builds the local one, without them", name, plural(behind), upstream)
+	}
+	return ""
 }
