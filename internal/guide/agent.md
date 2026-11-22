@@ -43,6 +43,7 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
   restarted and checked. `deploy.local: true` does this on this machine, with
   no ssh (j-cicd installs itself that way). `--no-deploy` still builds and
   hashes, but nothing is installed.
+
 `--plan` shows which kind and where it deploys.
 
 ## When a run fails
