@@ -290,6 +290,9 @@ func cmdMerge(args []string) error {
 	if *plan {
 		p, err := manager.PlanMerge(ctx, target, number)
 		if err != nil {
+			if *asJSON {
+				_ = printJSON(map[string]string{"status": "error", "error": err.Error()})
+			}
 			return fmt.Errorf("merge plan: %w", err)
 		}
 		log.Printf("PR #%d %q merges cleanly into %s (%s)", p.PR, p.Title, p.Base, p.BaseSHA[:12])

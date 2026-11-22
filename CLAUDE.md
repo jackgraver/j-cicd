@@ -357,15 +357,20 @@ output depends on who is reading:
 `j-cicd merge <project> <pr>` is a merge train for one PR, using the `gh`
 CLI (must be installed and logged in) and the project's `origin` remote:
 
-1. `gh pr view` must say the PR is open, from the same repo (forks are
-   refused) and targeting the project's `branch:` (else any base).
+1. `gh pr view` (pinned to `origin`'s repo with `-R`) must say the PR is
+   open, not a draft, not awaiting/refused review, from the same repo
+   (forks are refused) and targeting the project's `branch:` (else the
+   repo's default branch), with the fetched head matching GitHub's.
 2. The PR (`refs/pull/N/head`) and its base are fetched and merged *in the
    object store* (`git merge-tree` + `commit-tree`), so the checkout, index
    and branches are never touched. Conflicts fail the run.
 3. The merge commit is checked out as a snapshot (like a release branch),
    and steps, images (tagged with the merge commit), deploy and verify run.
-4. Only if that all passed, and `origin/<base>` is still where the merge
-   was made, that exact commit is pushed (fast-forward, never forced) to
+4. Right before the deploy, and again before the push, `origin/<base>` and
+   the PR's head must still be where the merge was made (else nothing is
+   deployed/pushed). Only if all passed, that exact commit is pushed (a
+   compare-and-swap `--force-with-lease` on the tested base, so never a
+   blind force) to
    the base — GitHub then shows the PR merged, and main is what was
    deployed. `--no-merge` stops before the push; `--plan` just checks the
    PR merges cleanly.

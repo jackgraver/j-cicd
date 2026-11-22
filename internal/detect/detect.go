@@ -137,6 +137,12 @@ func githubRepo(projectDir string) (owner, repo string, ok bool) {
 	return strings.ToLower(m[1]), strings.ToLower(m[2]), true
 }
 
+// GitHubRepo is githubRepo for other packages: the owner and repository
+// (lowercased) of projectDir's GitHub "origin" remote.
+func GitHubRepo(projectDir string) (owner, repo string, ok bool) {
+	return githubRepo(projectDir)
+}
+
 // GitRevision returns a short identifier for what's checked out in
 // projectDir, suitable for use as an image tag, and whether it could be
 // determined at all (false when projectDir isn't a git repository or has
