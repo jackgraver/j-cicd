@@ -320,12 +320,17 @@ output depends on who is reading:
   `timed_out=true` — whichever apply). Off a terminal stderr carries no
   timestamps (the run log keeps them).
 - **Failures are structured.** Every run records `stages` (name, kind,
-  status ok|failed|running, seconds, `exit_code` of a failing command,
+  status ok|failed|running — saved as each stage starts, so `running`
+  shows only for a run still going or killed — seconds, `exit_code` of a failing command,
   `timed_out`) and, if it didn't succeed, a `failure`: `kind` (a stage kind —
   step, build, push, artifacts, deploy, verify, docker-check, preflight,
   rollback — or config, cancelled, run), `stage`, `exit_code`, `timed_out`,
   `message` (the same text as `error`) and `tail`, the failing stage's last
-  40 lines cleaned of ANSI codes and progress-bar redraws. All of it is in
+  40 lines cleaned of ANSI codes and progress-bar redraws (for a verify
+  failure, the check's attempts, which no command printed). A stage with no
+  name of its own (docker-check, preflight, artifacts) uses its kind, and
+  its log marker is just `== stage artifacts ==`; `next` always gives the
+  unambiguous `--stage 'step test'` form. All of it is in
   `run.json`, so it survives the process and appears in `history --json`.
   Code: `pipeline.StageError`/`Stages()` (`internal/pipeline/stage.go`),
   `failureOf` in `internal/manager/manager.go`, cleaning in

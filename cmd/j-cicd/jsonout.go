@@ -120,6 +120,7 @@ func jsonFail(err error, project string, asJSON bool) error {
 // hasJSONFlag reports whether args ask for --json, for errors raised while
 // parsing the args themselves.
 func hasJSONFlag(args []string) bool {
+	asJSON := false
 	for _, a := range args {
 		flagName, ok := strings.CutPrefix(a, "--")
 		if !ok {
@@ -133,14 +134,14 @@ func hasJSONFlag(args []string) bool {
 			continue
 		}
 		if !hasValue {
-			return true
-		}
-		// The flag package accepts any strconv.ParseBool spelling.
-		if b, err := strconv.ParseBool(value); err == nil {
-			return b
+			asJSON = true
+		} else if b, err := strconv.ParseBool(value); err == nil {
+			// The flag package accepts any strconv.ParseBool spelling.
+			asJSON = b
 		}
 	}
-	return false
+	// The last one wins, as it does for the flag package.
+	return asJSON
 }
 
 // nextSteps are commands worth running after a run that didn't succeed.
@@ -149,8 +150,8 @@ func nextSteps(r store.Run) []string {
 		return nil
 	}
 	var next []string
-	if f := r.Failure; f != nil && f.Stage != "" && f.Kind != store.FailureConfig {
-		next = append(next, fmt.Sprintf("j-cicd logs %s --stage %s", r.ID, shellQuote(f.Stage)))
+	if text := failedStageText(r); text != "" {
+		next = append(next, fmt.Sprintf("j-cicd logs %s --stage %s", r.ID, shellQuote(text)))
 	}
 	next = append(next, fmt.Sprintf("j-cicd logs %s --tail 200", r.ID))
 	if r.Deployed && r.Kind != store.KindRollback {
@@ -160,6 +161,23 @@ func nextSteps(r store.Run) []string {
 		next = append(next, "j-cicd run "+r.Project+" --plan")
 	}
 	return next
+}
+
+// failedStageText is how the log marks the stage that failed ("step test"),
+// the unambiguous form for --stage, or "" if no stage failed. A cancelled
+// failure has no stage kind of its own, so the kind comes from the stage
+// record.
+func failedStageText(r store.Run) string {
+	f := r.Failure
+	if f == nil || f.Stage == "" || f.Kind == store.FailureConfig {
+		return ""
+	}
+	for i := len(r.Stages) - 1; i >= 0; i-- {
+		if s := r.Stages[i]; s.Name == f.Stage && s.Status == "failed" {
+			return manager.StageMarkerText(s.Kind, s.Name)
+		}
+	}
+	return f.Stage
 }
 
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=,-]+$`)

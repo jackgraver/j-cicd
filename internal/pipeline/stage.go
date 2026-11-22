@@ -27,6 +27,9 @@ const (
 	StageFailed  = "failed"
 )
 
+// A stage with nothing to name besides its kind (the docker check, the
+// preflight, the artifacts check) uses the kind as its name.
+
 // StageResult is how one stage of the last Run went.
 type StageResult struct {
 	Name, Kind, Status string

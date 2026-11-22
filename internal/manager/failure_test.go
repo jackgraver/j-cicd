@@ -107,3 +107,45 @@ func TestCleanLine(t *testing.T) {
 		}
 	}
 }
+
+// A run in progress shows the stages it has reached, not only at the end.
+func TestStagesAreSavedWhileTheRunIsGoing(t *testing.T) {
+	st, target := setup(t, twoSteps)
+	var midRun []store.RunStage
+	runner := &hookRunner{fakeRunner: fakeRunner{}, onRun: func(cmd string) {
+		if strings.Contains(cmd, "make test") {
+			runs, _ := st.Runs(target.Name, 1)
+			midRun = runs[0].Stages
+		}
+	}}
+	if _, err := Run(context.Background(), st, target, Options{Runner: runner}); err != nil {
+		t.Fatal(err)
+	}
+	if len(midRun) != 2 || midRun[0].Status != "ok" || midRun[1].Name != "test" || midRun[1].Status != "running" {
+		t.Errorf("stages mid-run = %+v, want build ok then test running", midRun)
+	}
+	runs, _ := st.Runs(target.Name, 1)
+	if got := runs[0].Stages; len(got) != 2 || got[1].Status != "ok" {
+		t.Errorf("final stages = %+v, want both ok and none still running", got)
+	}
+}
+
+type hookRunner struct {
+	fakeRunner
+	onRun func(cmd string)
+}
+
+func (h *hookRunner) Run(ctx context.Context, dir, name string, args ...string) error {
+	h.onRun(strings.Join(append([]string{name}, args...), " "))
+	return h.fakeRunner.Run(ctx, dir, name, args...)
+}
+
+func TestStageMarkerText(t *testing.T) {
+	for _, c := range []struct{ kind, name, want string }{
+		{"step", "test", "step test"}, {"artifacts", "artifacts", "artifacts"}, {"preflight", "preflight", "preflight"},
+	} {
+		if got := StageMarkerText(c.kind, c.name); got != c.want {
+			t.Errorf("StageMarkerText(%q, %q) = %q, want %q", c.kind, c.name, got, c.want)
+		}
+	}
+}

@@ -61,6 +61,10 @@ type Options struct {
 	// the stage prints a progress line. It is how a caller marks where a
 	// stage's output starts. Nil means none.
 	OnStage func(kind, name string)
+	// Detail, if set, receives the lines that explain a stage's outcome but
+	// that no command printed (the verify checks' attempts), so a caller can
+	// show them with the stage's own output. Nil means none.
+	Detail io.Writer
 }
 
 // Pipeline runs one project's pipeline.
@@ -74,6 +78,7 @@ type Pipeline struct {
 	log         *log.Logger
 	progress    io.Writer
 	onStage     func(kind, name string)
+	detail      io.Writer
 	httpClient  *http.Client
 	verifyEvery time.Duration
 	// Results a caller can read once Run returns.
@@ -99,6 +104,7 @@ func New(projectDir string, opts Options) *Pipeline {
 		log:         opts.Logger,
 		progress:    opts.Progress,
 		onStage:     opts.OnStage,
+		detail:      opts.Detail,
 		httpClient:  opts.HTTPClient,
 		verifyEvery: opts.VerifyInterval,
 
@@ -137,10 +143,10 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 	if deploying {
 		// Checked up front: finding out after a long build and a push
 		// that the result can't be deployed is the expensive way round.
-		p.stage(KindPreflight, "deploy-check")
+		p.stage(KindPreflight, KindPreflight)
 		refs, err := p.deployRefs(cfg)
 		if err != nil {
-			return stageErr(KindPreflight, "deploy-check", err, "cannot deploy this build: %v", err)
+			return stageErr(KindPreflight, KindPreflight, err, "cannot deploy this build: %v", err)
 		}
 		deployRefs = refs
 	}
@@ -149,9 +155,9 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 		// Before the steps, not at the first docker build: a daemon that
 		// isn't reachable should fail the run in a second, with the
 		// reason as the run's error, not after a full build and test.
-		p.stage(KindDocker, "docker")
+		p.stage(KindDocker, KindDocker)
 		if err := p.checkDocker(ctx); err != nil {
-			return stageErr(KindDocker, "docker", err, "%v", err)
+			return stageErr(KindDocker, KindDocker, err, "%v", err)
 		}
 	}
 
@@ -196,10 +202,10 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 	}
 
 	if len(cfg.Artifacts) > 0 {
-		p.stage(KindArtifacts, "artifacts")
+		p.stage(KindArtifacts, KindArtifacts)
 	}
 	if err := p.collectArtifacts(cfg); err != nil {
-		return stageErr(KindArtifacts, "artifacts", err, "%v", err)
+		return stageErr(KindArtifacts, KindArtifacts, err, "%v", err)
 	}
 
 	switch {
@@ -217,6 +223,8 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 		}
 		p.deployed = true
 		if err := p.verify(ctx, cfg); err != nil {
+			// verify opens a stage for each check before it can fail, so the
+			// current stage is the check that failed.
 			return stageErr(KindVerify, p.currentStage(), err, "deployed to %s, but %v (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}

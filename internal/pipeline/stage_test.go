@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ func TestStagesRecordedOnSuccess(t *testing.T) {
 		}
 		got = append(got, s.Kind+":"+s.Name)
 	}
-	assertCalls(t, got, []string{"docker-check:docker", "step:build", "step:test", "build:example.com/demo", "push:example.com/demo"})
+	assertCalls(t, got, []string{"docker-check:docker-check", "step:build", "step:test", "build:example.com/demo", "push:example.com/demo"})
 }
 
 func TestStageErrorCarriesExitCodeAndStage(t *testing.T) {
@@ -124,5 +125,29 @@ func TestVerifyFailureNamesTheCheckAndStagesAnnounceThemselves(t *testing.T) {
 	}
 	if strings.Join(got, " ") != strings.Join(announced, " ") {
 		t.Errorf("stages %v != announced %v", got, announced)
+	}
+}
+
+// The verify attempts are lines no command printed; Detail is how a caller
+// gets them (the failure tail), so a verify failure isn't left with none.
+func TestVerifyAttemptsGoToDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"commit":"stalestalest"}`)
+	}))
+	defer srv.Close()
+
+	var detail strings.Builder
+	p := verifyPipeline(&fakeRunner{})
+	p.detail = &detail
+	if err := p.Run(context.Background(), verifyConfig(t, srv.URL, "60ms")); err == nil {
+		t.Fatal("Run succeeded against a site serving another release")
+	}
+	for _, want := range []string{"[verify] GET " + srv.URL, "[verify] attempt 1:", "stalestalest", "still not serving this release"} {
+		if !strings.Contains(detail.String(), want) {
+			t.Errorf("detail lacks %q:\n%s", want, detail.String())
+		}
+	}
+	if regexp.MustCompile(`\d{4}/\d{2}/\d{2}`).MatchString(detail.String()) {
+		t.Errorf("detail lines carry the log's timestamp:\n%s", detail.String())
 	}
 }

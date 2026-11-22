@@ -62,8 +62,10 @@ func markerText(line string) (string, bool) {
 }
 
 // stageLines returns the lines of the stages named want: from each matching
-// marker to the next one. A marker reads "<kind> <name>"; want matches the
-// whole of it ("step test", "build app") or the name alone ("test"), exactly
+// marker to the next one. A marker reads "<kind> <name>", or just "<kind>"
+// for a stage with no name of its own (see manager.StageMarkerText); want
+// matches the whole of it ("step test", "build app", "artifacts") or the
+// name alone ("test"), exactly
 // and case-insensitively. Several stages can match (an image is built and
 // pushed under one name); all are kept, markers included, so the result
 // still says where each came from.
@@ -73,7 +75,10 @@ func stageLines(lines []string, want string) ([]string, error) {
 	for _, l := range lines {
 		if text, ok := markerText(l); ok {
 			seen = append(seen, text)
-			_, name, _ := strings.Cut(text, " ")
+			name := text
+			if _, after, ok := strings.Cut(text, " "); ok {
+				name = after
+			}
 			keep = strings.EqualFold(text, want) || strings.EqualFold(name, want)
 		}
 		if keep {

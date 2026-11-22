@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestJSONFailedRunNamesStageExitCodeAndNextSteps(t *testing.T) {
 	for _, n := range obj["next"].([]any) {
 		next = append(next, n.(string))
 	}
-	if want := "j-cicd logs " + id + " --stage test"; !slices.Contains(next, want) {
+	if want := "j-cicd logs " + id + " --stage 'step test'"; !slices.Contains(next, want) {
 		t.Errorf("next = %v, want it to include %q", next, want)
 	}
 }
@@ -133,7 +134,9 @@ func TestShellQuoteAndHasJSONFlag(t *testing.T) {
 	for args, want := range map[string]bool{
 		"run --json": true, "run -json": true, "run --json=true": true, "run --json=1": true,
 		"run --json=TRUE": true, "run --json=t": true, "run --json=false": false,
-		"run --json=0": false, "run x": false, "run --jsonx": false, "run json": false,
+		"run --json=0": false, "run x": false,
+		// The last one wins, as with the flag package.
+		"run --json=false --json --nope": true, "run --json --json=false": false, "run --jsonx": false, "run json": false,
 	} {
 		if got := hasJSONFlag(strings.Fields(args)); got != want {
 			t.Errorf("hasJSONFlag(%q) = %v, want %v", args, got, want)
@@ -148,8 +151,8 @@ func TestNextStageHintsWork(t *testing.T) {
 	cases := map[string]string{
 		"artifacts": "name: art\nsteps:\n  - name: hi\n    run: echo hi\nartifacts:\n  - name: bin\n    path: dist/bin\n",
 		// Not a git repo, so the deploy is refused before anything runs.
-		"deploy-check": "name: dep\nsteps:\n  - name: hi\n    run: echo hi\nimages:\n  - repository: example.com/x\ndeploy:\n  host: nowhere\n",
-		"test":         "name: stp\nsteps:\n  - name: hi\n    run: echo hi\n  - name: test\n    run: exit 1\n",
+		"preflight": "name: dep\nsteps:\n  - name: hi\n    run: echo hi\nimages:\n  - repository: example.com/x\ndeploy:\n  host: nowhere\n",
+		"test":      "name: stp\nsteps:\n  - name: hi\n    run: echo hi\n  - name: test\n    run: exit 1\n",
 	}
 	for stage, config := range cases {
 		t.Run(stage, func(t *testing.T) {
@@ -169,12 +172,32 @@ func TestNextStageHintsWork(t *testing.T) {
 				}
 			}
 			id := obj["id"].(string)
-			var out string
+			// Run the hint itself: its --stage argument, quotes removed.
+			m := regexp.MustCompile(`--stage (.*)$`).FindStringSubmatch(obj["next"].([]any)[0].(string))
+			if m == nil {
+				t.Fatalf("next[0] = %v, want a logs --stage hint", obj["next"])
+			}
+			arg := strings.Trim(m[1], "'")
 			var logsCode int
-			out = captureStdout(t, func() { logsCode = appStart([]string{"logs", id, "--stage", stage}) })
-			if logsCode != exitOK || !strings.Contains(out, "== stage ") || !strings.Contains(out, " "+stage+" ==") {
-				t.Errorf("logs --stage %s: exit %d, output:\n%s", stage, logsCode, out)
+			out := captureStdout(t, func() { logsCode = appStart([]string{"logs", id, "--stage", arg}) })
+			if logsCode != exitOK || !strings.Contains(out, "== stage "+arg+" ==") {
+				t.Errorf("logs --stage %q: exit %d, output:\n%s", arg, logsCode, out)
 			}
 		})
+	}
+}
+
+func TestNextStepUsesTheUnambiguousStageForm(t *testing.T) {
+	// A cancelled run's failure has no stage kind; the stage record has it.
+	r := store.Run{ID: "r", Project: "app", Status: store.StatusCancelled,
+		Failure: &store.RunFailure{Kind: store.FailureCancelled, Stage: "test"},
+		Stages:  []store.RunStage{{Name: "setup", Kind: "step", Status: "ok"}, {Name: "test", Kind: "step", Status: "failed"}}}
+	if got := nextSteps(r); len(got) == 0 || got[0] != "j-cicd logs r --stage 'step test'" {
+		t.Errorf("next = %v", got)
+	}
+	// A stage named for its kind is just the kind.
+	r.Failure.Stage, r.Stages = "artifacts", []store.RunStage{{Name: "artifacts", Kind: "artifacts", Status: "failed"}}
+	if got := nextSteps(r); got[0] != "j-cicd logs r --stage artifacts" {
+		t.Errorf("next = %v", got)
 	}
 }

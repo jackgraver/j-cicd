@@ -200,6 +200,10 @@ func (s *Store) StartRun(r Run) (*RunHandle, error) {
 	return &RunHandle{s: s, Run: r, Log: logFile}, nil
 }
 
+// Save writes the run record as it stands, so readers of the store see
+// progress (the stages so far) before the run finishes.
+func (h *RunHandle) Save() error { return writeJSON(h.s.runPath(h.Run.ID), h.Run) }
+
 // Finish records the run's outcome and closes its log. errMsg is the
 // failure reason, if any.
 func (h *RunHandle) Finish(status Status, errMsg string) error {

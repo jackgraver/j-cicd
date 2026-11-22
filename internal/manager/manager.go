@@ -163,7 +163,7 @@ func Rollback(ctx context.Context, st *store.Store, t Target, opts Options) (sto
 		if err != nil {
 			return &ConfigError{Err: err}
 		}
-		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages, OnStage: env.onStage})
+		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages, OnStage: env.onStage, Detail: env.detail})
 		err = p.Rollback(ctx, cfg)
 		recordStages(env.run, p.Stages())
 		if err != nil {
@@ -217,7 +217,10 @@ type runEnv struct {
 	// marker to the run log and discards the output kept so far, so a
 	// failure's tail is that stage's output alone.
 	onStage func(kind, name string)
-	run     *store.Run
+	// detail receives lines that explain a stage's outcome but that no
+	// command printed: the failure tail includes them.
+	detail io.Writer
+	run    *store.Run
 	// warnings collects every warnf, for callers that report them
 	// themselves (Plan).
 	warnings []string
@@ -266,10 +269,23 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	// stage that prints no progress line still gets one and still starts a
 	// fresh tail, so the tail never shows an earlier stage's output.
 	env := &runEnv{out: cmdOut, log: logger, progress: progress, run: &h.Run, stages: progress}
+	var stageStart time.Time
 	env.onStage = func(kind, name string) {
 		tail.reset()
-		fmt.Fprintf(h.Log, "%s%s %s ==\n", StageMarker, kind, name)
+		fmt.Fprintf(h.Log, "%s%s ==\n", StageMarker, StageMarkerText(kind, name))
+		// Record the stage now, not when the run ends, so history and the
+		// dashboard show a running run's progress. The final list from the
+		// pipeline replaces this one (see recordStages).
+		now := time.Now()
+		if n := len(h.Run.Stages); n > 0 && h.Run.Stages[n-1].Status == pipeline.StageRunning {
+			h.Run.Stages[n-1].Status = pipeline.StageOK
+			h.Run.Stages[n-1].Seconds = now.Sub(stageStart).Round(100 * time.Millisecond).Seconds()
+		}
+		h.Run.Stages = append(h.Run.Stages, store.RunStage{Name: name, Kind: kind, Status: pipeline.StageRunning})
+		stageStart = now
+		_ = h.Save() // progress only: the final record is written by Finish
 	}
+	env.detail = tail
 	runErr := fn(env)
 
 	status := store.StatusSuccess
@@ -303,6 +319,15 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 // "== stage build app ==".
 const StageMarker = "== stage "
 
+// StageMarkerText is what follows StageMarker for a stage: "<kind> <name>",
+// or just the kind for a stage that has no name of its own (name == kind).
+func StageMarkerText(kind, name string) string {
+	if name == kind || name == "" {
+		return kind
+	}
+	return kind + " " + name
+}
+
 // failureOf describes why a run failed, from the error that stopped it
 // and the end of the failing stage's output.
 func failureOf(ctx context.Context, err error, tail []string) *store.RunFailure {
@@ -327,6 +352,7 @@ func failureOf(ctx context.Context, err error, tail []string) *store.RunFailure 
 
 // recordStages copies the pipeline's stage results into the run.
 func recordStages(run *store.Run, stages []pipeline.StageResult) {
+	run.Stages = nil // the live list onStage kept; this one has the outcomes
 	for _, s := range stages {
 		rs := store.RunStage{Name: s.Name, Kind: s.Kind, Status: s.Status, Seconds: s.Duration.Round(100 * time.Millisecond).Seconds(), TimedOut: s.TimedOut}
 		if s.ExitCode >= 0 {
@@ -439,6 +465,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Logger:      env.log,
 		Progress:    env.stages,
 		OnStage:     env.onStage,
+		Detail:      env.detail,
 	})
 	err := p.Run(ctx, cfg)
 	recordStages(env.run, p.Stages())
