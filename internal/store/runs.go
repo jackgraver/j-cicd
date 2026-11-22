@@ -38,25 +38,73 @@ const DefaultKeepRuns = 50
 // instead of running its pipeline.
 const KindRollback = "rollback"
 
+// KindMerge marks a run of a pull request merged onto its base: the merge
+// is tested and deployed, and pushed to the base if that all passed.
+const KindMerge = "merge"
+
 // Run is one recorded pipeline run.
 type Run struct {
 	ID      string `json:"id"`
 	Project string `json:"project"`
-	// Kind is "" for a pipeline run, or KindRollback.
+	// Kind is "" for a pipeline run, KindRollback or KindMerge.
 	Kind   string `json:"kind,omitempty"`
 	Dir    string `json:"dir"`
 	Config string `json:"config"`
 	// Revision is the git revision the run built ("" if not a git tree).
-	Revision   string    `json:"revision,omitempty"`
-	Push       bool      `json:"push"`
-	Status     Status    `json:"status"`
-	Error      string    `json:"error,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Revision string `json:"revision,omitempty"`
+	Push     bool   `json:"push"`
+	// For a KindMerge run: the pull request, its head commit when merged
+	// locally, whether the merge commit (MergedSHA, which is what was built
+	// and deployed) was then pushed to the base branch.
+	PR        int    `json:"pr,omitempty"`
+	PRHeadSHA string `json:"pr_head_sha,omitempty"`
+	PRMerged  bool   `json:"pr_merged,omitempty"`
+	MergedSHA string `json:"merged_sha,omitempty"`
+	// Images are the images this run pushed, with the registry digest
+	// each resolved to; Deployed is whether the deploy stage then handed
+	// them to DeployHost. Both are empty for a run that didn't get that far.
+	Images []RunImage `json:"images,omitempty"`
+	// Artifacts are the files the steps built, by sha256 (what an
+	// artifacts deploy sends).
+	Artifacts []RunArtifact `json:"artifacts,omitempty"`
+	Deployed  bool          `json:"deployed,omitempty"`
+	// Verified are the post-deploy checks that passed.
+	Verified   []RunVerify `json:"verified,omitempty"`
+	DeployHost string      `json:"deploy_host,omitempty"`
+	Status     Status      `json:"status"`
+	Error      string      `json:"error,omitempty"`
+	StartedAt  time.Time   `json:"started_at"`
+	FinishedAt time.Time   `json:"finished_at,omitzero"`
 	// PID is the j-cicd process executing the run. It's how a run that
 	// died without finishing is told apart from one still going, and what
 	// a UI signals to cancel it.
 	PID int `json:"pid"`
+}
+
+// RunVerify is a post-deploy check that passed: how many requests it took
+// and how long, until the site served the new release.
+type RunVerify struct {
+	URL      string  `json:"url"`
+	Attempts int     `json:"attempts"`
+	Seconds  float64 `json:"seconds"`
+}
+
+// RunArtifact is one artifact a run built.
+type RunArtifact struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// RunImage is one image a run built and pushed.
+type RunImage struct {
+	Name       string   `json:"name"`
+	Repository string   `json:"repository"`
+	Tags       []string `json:"tags"`
+	// Digest is the registry's content hash for the push (sha256:...),
+	// "" if it couldn't be read back.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Duration is how long the run took, or has taken so far.

@@ -22,6 +22,9 @@ type release struct {
 	// the top level), so a project in a monorepo subdirectory builds the
 	// same subdirectory of the snapshot.
 	prefix string
+	// pr is the pull request number when commit is a PR merged onto branch
+	// (a commit that exists on no branch), else 0.
+	pr int
 }
 
 // resolveRelease finds the commit the local branch points at in the
@@ -59,10 +62,10 @@ func snapshotDir(root, project string) string {
 	return filepath.Join(root, "snapshots", project)
 }
 
-// createSnapshot checks rel.commit out at snapshotDir(root, project). A
-// leftover from a run that was killed before cleaning up is removed first.
-func createSnapshot(ctx context.Context, root, project, repo string, rel *release) (*snapshot, error) {
-	s := &snapshot{repo: repo, dir: snapshotDir(root, project)}
+// createSnapshot checks rel.commit out at dir. A leftover from a run that
+// was killed before cleaning up is removed first.
+func createSnapshot(ctx context.Context, dir, repo string, rel *release) (*snapshot, error) {
+	s := &snapshot{repo: repo, dir: dir}
 	if err := s.remove(); err != nil {
 		return nil, fmt.Errorf("removing stale snapshot %s: %w", s.dir, err)
 	}
@@ -112,4 +115,66 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", args[0], err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// syncWarning says how ref (a local branch, or "HEAD") stands against its
+// upstream, so it's never a guess whether a build includes commits that
+// haven't been pushed. It compares against the last fetch; j-cicd never
+// touches the network for this. "" means in sync, or no upstream to
+// compare with.
+func syncWarning(ctx context.Context, dir, ref string) string {
+	s, ok := upstreamSync(ctx, dir, ref)
+	if !ok {
+		return ""
+	}
+	return formatSync(refName(ref), s.Upstream, s.Ahead, s.Behind)
+}
+
+// syncStatus is how a local ref stands against its upstream.
+type syncStatus struct {
+	Upstream      string
+	Ahead, Behind int
+}
+
+// upstreamSync compares ref with its configured upstream as of the last
+// fetch. ok is false when there's no upstream to compare with.
+func upstreamSync(ctx context.Context, dir, ref string) (syncStatus, bool) {
+	upstream, err := git(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", ref+"@{upstream}")
+	if err != nil {
+		return syncStatus{}, false
+	}
+	counts, err := git(ctx, dir, "rev-list", "--left-right", "--count", ref+"..."+upstream)
+	if err != nil {
+		return syncStatus{}, false
+	}
+	s := syncStatus{Upstream: upstream}
+	if _, err := fmt.Sscanf(counts, "%d %d", &s.Ahead, &s.Behind); err != nil {
+		return syncStatus{}, false
+	}
+	return s, true
+}
+
+func refName(ref string) string {
+	if ref == "HEAD" {
+		return "the checked-out branch"
+	}
+	return ref
+}
+
+func formatSync(name, upstream string, ahead, behind int) string {
+	plural := func(n int) string {
+		if n == 1 {
+			return "1 commit"
+		}
+		return fmt.Sprintf("%d commits", n)
+	}
+	switch {
+	case ahead > 0 && behind > 0:
+		return fmt.Sprintf("local %s has diverged from %s (%s ahead, %s behind, as of the last fetch); j-cicd builds the local one", name, upstream, plural(ahead), plural(behind))
+	case ahead > 0:
+		return fmt.Sprintf("local %s is %s ahead of %s (not pushed); j-cicd builds the local one, so those commits are included", name, plural(ahead), upstream)
+	case behind > 0:
+		return fmt.Sprintf("local %s is %s behind %s (as of the last fetch); j-cicd builds the local one, without them", name, plural(behind), upstream)
+	}
+	return ""
 }

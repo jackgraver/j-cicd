@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -38,10 +40,23 @@ Usage:
   j-cicd history [name]        list recorded runs, newest first
   j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
   j-cicd cancel <run-id|name>  stop a run in progress
+  j-cicd merge <name|dir> <pr> merge a GitHub PR onto its base locally, test and deploy it, then push it
   j-cicd rollback [name|dir]   revert the last deploy on the VPS (images only, not the database)
 
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
   j-cicd version               print the j-cicd version
+
+Output: at a terminal, run streams everything. Anywhere else (a pipe, a
+script, an agent) it prints one line per stage and, if something fails, the
+last lines of the failing command; -v streams everything, --quiet prints only
+the final status. The full output is always recorded: j-cicd logs <run-id>.
+--json (run, rollback, list, history) prints machine-readable results on
+stdout; prose and progress always go to stderr. run --plan shows what would
+happen without doing it.
+
+Exit status: 0 success; 1 the pipeline (or rollback) failed or was cancelled;
+2 usage error; 3 config could not be loaded. Check it directly: in a pipeline
+like "j-cicd run x | tail", $? is tail's, not j-cicd's (use set -o pipefail).
 
 Every run is recorded under the state dir (`+"$"+store.HomeEnv+`, else
 $XDG_STATE_HOME/j-cicd, else ~/.local/state/j-cicd).
@@ -71,13 +86,20 @@ type runArgs struct {
 	deploy bool
 	// deployDirty allows deploying a build with uncommitted changes.
 	deployDirty bool
+	// verbose streams all command output; json prints the result as JSON
+	// on stdout; plan only reports what would happen.
+	verbose, json, plan bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
 	noPush := fs.Bool("no-push", false, "build the image (if configured) but skip pushing it (implies --no-deploy)")
-	quiet := fs.Bool("quiet", false, "don't echo the run's output (it's still recorded; see j-cicd logs)")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal; elsewhere only stage lines and a failure's last lines are shown)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout (run id, status, commit, pushed image digests)")
+	plan := fs.Bool("plan", false, "show what would run (commit, steps, images, deploy host) without running, building, pushing or deploying")
 	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
 	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
 
@@ -86,7 +108,8 @@ func parseRunArgs(args []string) (runArgs, error) {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty}
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty,
+		verbose: *verbose, json: *asJSON, plan: *plan}
 	parsed.defaultPaths()
 	return parsed, nil
 }
@@ -135,17 +158,61 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty}
-	if !parsed.quiet {
-		opts.Echo = os.Stderr
+	if parsed.plan {
+		return cmdPlan(ctx, st, target, opts, parsed.json)
 	}
+	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, parsed.json)
 	run, err := manager.Run(ctx, st, target, opts)
-	return reportRun(run, err, "pipeline failed")
+	return reportRun(run, err, "pipeline failed", parsed.json)
+}
+
+// outputMode picks what a foreground run shows on stderr. At a terminal
+// that's everything, as it happens. Anywhere else (a pipe, an agent, a
+// log file) it's the stage lines plus the end of whatever failed, since
+// thousands of docker layer lines bury the one that matters; -v brings
+// the full stream back and --quiet drops all of it. Either way the whole
+// output is recorded (j-cicd logs). --json is a script asking, so it gets
+// the concise form even at a terminal.
+func outputMode(quiet, verbose, asJSON bool) (echo, progress io.Writer) {
+	switch {
+	case quiet:
+		return nil, nil
+	case verbose || (!asJSON && isTerminal(os.Stderr)):
+		return os.Stderr, nil
+	default:
+		return nil, os.Stderr
+	}
+}
+
+// cmdPlan is `run --plan`: report what the run would do, touching nothing.
+func cmdPlan(ctx context.Context, st *store.Store, target manager.Target, opts manager.Options, asJSON bool) error {
+	plan, err := manager.MakePlan(ctx, st, target, opts)
+	if err != nil {
+		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
+			err = &exitError{code: exitConfig, err: err}
+		}
+		return err
+	}
+	if asJSON {
+		if err := printJSON(plan); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(plan.Describe())
+	}
+	if len(plan.Problems) > 0 {
+		return fmt.Errorf("this run would fail: %s", strings.Join(plan.Problems, "; "))
+	}
+	return nil
 }
 
 func cmdRollback(args []string) error {
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
-	quiet := fs.Bool("quiet", false, "don't echo the rollback's output (it's still recorded; see j-cicd logs)")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -171,29 +238,140 @@ func cmdRollback(args []string) error {
 	defer stop()
 
 	opts := manager.Options{}
-	if !*quiet {
-		opts.Echo = os.Stderr
-	}
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
 	run, err := manager.Rollback(ctx, st, target, opts)
-	return reportRun(run, err, "rollback failed")
+	return reportRun(run, err, "rollback failed", *asJSON)
 }
 
-// reportRun logs how a recorded run ended and maps its error to an exit
-// code.
-func reportRun(run store.Run, err error, failed string) error {
-	if run.ID != "" && run.Status.Done() {
-		log.Printf("run %s %s after %s (output: j-cicd logs %s)", run.ID, run.Status, display.Duration(run.Duration()), run.ID)
+// parsePRNumber reads "12" or "#12".
+func parsePRNumber(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimPrefix(s, "#"))
+	if err != nil || n <= 0 {
+		return 0, usageError(fmt.Errorf("%q is not a pull request number", s))
 	}
+	return n, nil
+}
+
+// cmdMerge is `j-cicd merge <project> <pr>`: merge the PR onto its base in
+// a throwaway checkout, run the whole pipeline on it, and push it to the
+// base only if that passed.
+func cmdMerge(args []string) error {
+	fs := flag.NewFlagSet("merge", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
+	plan := fs.Bool("plan", false, "check that the PR merges cleanly and say what would run, without running anything")
+	noDeploy := fs.Bool("no-deploy", false, "test and push images, but skip the deploy: stage (the PR is still merged afterwards)")
+	noMerge := fs.Bool("no-merge", false, "run the pipeline on the merge, but don't push it to the base branch")
+	pos, err := parseFlagsOnly(fs, args, "<name|project-dir> <pr-number> [flags]", 2, 2)
 	if err != nil {
-		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
-			return &exitError{code: exitConfig, err: err}
-		}
-		if errors.Is(err, manager.ErrBusy) {
-			return err
-		}
-		return fmt.Errorf("%s: %w", failed, err)
+		return err
 	}
-	return nil
+	number, err := parsePRNumber(pos[1])
+	if err != nil {
+		return err
+	}
+	parsed := runArgs{projectDir: pos[0], configPath: *configPath}
+	parsed.defaultPaths()
+
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *plan {
+		p, err := manager.PlanMerge(ctx, target, number)
+		if err != nil {
+			if *asJSON {
+				_ = printJSON(map[string]string{"status": "error", "error": err.Error()})
+			}
+			return fmt.Errorf("merge plan: %w", err)
+		}
+		log.Printf("PR #%d %q merges cleanly into %s (%s)", p.PR, p.Title, p.Base, p.BaseSHA[:12])
+		log.Printf("  would build and test merge commit %s (PR head %s)", p.Revision, p.HeadSHA[:12])
+		log.Printf("  then push it to %s unless --no-merge", p.Base)
+		if *asJSON {
+			return printJSON(p)
+		}
+		return nil
+	}
+
+	opts := manager.Options{Deploy: !*noDeploy}
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
+	run, err := manager.MergePR(ctx, st, target, number, *noMerge, opts)
+	return reportRun(run, err, "merge failed", *asJSON)
+}
+
+// reportRun says how a recorded run ended and maps its error to an exit
+// code. The prose goes to stderr; with asJSON the result is also printed
+// to stdout as JSON, even when the run failed, so a script always has one
+// object to parse (and the exit status to go with it).
+func reportRun(run store.Run, err error, failed string, asJSON bool) error {
+	if run.ID != "" && run.Status.Done() {
+		line := fmt.Sprintf("run %s %s after %s", run.ID, run.Status, display.Duration(run.Duration()))
+		if run.Revision != "" {
+			line += ", commit " + run.Revision
+		}
+		log.Printf("%s (output: j-cicd logs %s)", line, run.ID)
+		for _, img := range run.Images {
+			ref := img.Repository + ":" + strings.Join(img.Tags, ",")
+			if img.Digest != "" {
+				ref = img.Repository + "@" + img.Digest
+			}
+			log.Printf("  pushed %s: %s", img.Name, ref)
+		}
+		for _, a := range run.Artifacts {
+			log.Printf("  built %s: %s (sha256:%s)", a.Name, a.Path, a.SHA256[:min(12, len(a.SHA256))])
+		}
+		if run.Kind == store.KindMerge && run.Status == store.StatusSuccess {
+			if run.PRMerged {
+				log.Printf("  merged PR #%d: %s pushed to the base branch (git pull to update your checkout)", run.PR, run.Revision)
+			} else {
+				log.Printf("  PR #%d not merged (--no-merge)", run.PR)
+			}
+		}
+		if run.Deployed {
+			log.Printf("  deployed to %s", run.DeployHost)
+		}
+		for _, v := range run.Verified {
+			log.Printf("  verified %s (%d attempt(s), %.1fs)", v.URL, v.Attempts, v.Seconds)
+		}
+	}
+
+	var result error
+	if err != nil {
+		switch configErr := (*manager.ConfigError)(nil); {
+		case errors.As(err, &configErr):
+			result = &exitError{code: exitConfig, err: err}
+		case errors.Is(err, manager.ErrBusy):
+			result = err
+		default:
+			result = fmt.Errorf("%s: %w", failed, err)
+		}
+	}
+
+	if asJSON {
+		var out any
+		if run.ID != "" {
+			out = toJSONRun(run)
+		} else {
+			// Nothing was recorded (config didn't load, project busy):
+			// still one object, saying why.
+			out = map[string]string{"status": "error", "error": result.Error()}
+		}
+		if jsonErr := printJSON(out); jsonErr != nil && result == nil {
+			result = jsonErr
+		}
+	}
+	return result
 }
 
 // resolveRunTarget decides what `j-cicd run <x>` means. A bare word that

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +31,9 @@ type Agent struct {
 	log          *log.Logger
 	pollInterval time.Duration
 	now          func() time.Time
+	// isRoot reports whether the agent runs as root (systemd restarts
+	// then need no sudo). Tests replace it.
+	isRoot func() bool
 }
 
 // New returns an Agent for cfg.
@@ -40,6 +44,7 @@ func New(cfg *Config, opts Options) *Agent {
 		log:          opts.Logger,
 		pollInterval: 2 * time.Second,
 		now:          time.Now,
+		isRoot:       func() bool { return os.Geteuid() == 0 },
 	}
 	if a.runner == nil {
 		a.runner = pipeline.ExecRunner{}
@@ -122,17 +127,31 @@ func (p *Project) resolve(refs []string) ([]release, error) {
 // changed, wait for them to report healthy, and roll back to the last
 // healthy release if they don't. Any outcome other than "new release is
 // healthy" is an error, so the build host's run fails too.
-func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string) error {
+//
+// compose, if not nil, is the compose file that goes with this release
+// (sent by the build host from the commit it built). It is stored, used
+// for this and later deploys, and restored by a rollback. Nil keeps
+// whichever compose file is in use.
+func (a *Agent) Deploy(ctx context.Context, projectName string, refs []string, compose []byte) error {
 	proj, err := a.cfg.Project(projectName)
 	if err != nil {
 		return err
+	}
+	if proj.IsFiles() {
+		return fmt.Errorf("project %q installs files (files: in the agent config), so it is deployed with artifacts, not images", proj.Name)
 	}
 	releases, err := proj.resolve(refs)
 	if err != nil {
 		return err
 	}
 	return a.locked(ctx, proj, func(st *State) error {
-		return a.deploy(ctx, proj, st, releases)
+		target := st.composeCurrent()
+		if compose != nil {
+			if target, err = storeCompose(a.cfg.StateDir, proj.Name, compose); err != nil {
+				return fmt.Errorf("storing the compose file: %w", err)
+			}
+		}
+		return a.deploy(ctx, proj, st, releases, target)
 	})
 }
 
@@ -150,14 +169,22 @@ func (a *Agent) Rollback(ctx context.Context, projectName string) error {
 	if err != nil {
 		return err
 	}
+	if proj.IsFiles() {
+		return a.rollbackFiles(ctx, proj)
+	}
 	return a.locked(ctx, proj, func(st *State) error {
 		releases, err := lastDeployed(proj, st)
 		if err != nil {
 			return err
 		}
+		// The compose file goes back too if the last deploy changed it.
+		compose := st.composeCurrent()
+		if c := st.Compose; c != nil && len(releases) > 0 && c.CurrentSince.Equal(st.service(releases[0].svc).since()) {
+			compose = c.Previous
+		}
 		a.log.Printf("rolling back %q's last deploy to %s", proj.Name, describe(releases))
-		a.log.Printf("note: only images are rolled back — database changes made by the release being replaced are not undone")
-		return a.deploy(ctx, proj, st, releases)
+		a.log.Printf("note: only images and the compose file are rolled back — database changes made by the release being replaced are not undone")
+		return a.deploy(ctx, proj, st, releases, compose)
 	})
 }
 
@@ -214,14 +241,19 @@ func (a *Agent) locked(ctx context.Context, proj *Project, fn func(*State) error
 	return fn(st)
 }
 
-// deploy is Deploy's body, with the lock held and state loaded.
-func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases []release) error {
+// deploy is Deploy's body, with the lock held and state loaded. compose
+// is the compose file to deploy with, by hash ("" for the configured one).
+func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases []release, compose string) error {
 	dctx, cancel := context.WithTimeout(ctx, proj.timeout())
 	defer cancel()
 
+	current := st.composeCurrent()
+	composeChanged := compose != current
+	newProj, oldProj := a.withCompose(proj, compose), a.withCompose(proj, current)
+
 	// Pull and resolve first, separately: if the registry is unreachable
 	// or the tag doesn't exist, nothing has been touched yet.
-	if err := a.pull(dctx, proj, st, releases); err != nil {
+	if err := a.pull(dctx, newProj, st, releases); err != nil {
 		a.recordUntouched(proj, st, releases, resultUntouched)
 		return fmt.Errorf("%w (nothing was changed)", err)
 	}
@@ -229,7 +261,7 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 	var changed []release
 	for _, r := range releases {
 		ss := st.service(r.svc)
-		if ss.Current == r.digest {
+		if ss.Current == r.digest && !composeChanged {
 			a.log.Printf("[%s] already running %s", r.svc.Name, label(r))
 			continue
 		}
@@ -237,6 +269,21 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 			a.log.Printf("[%s] warning: no previous release recorded, so this deploy cannot be rolled back", r.svc.Name)
 		}
 		changed = append(changed, r)
+	}
+	if composeChanged {
+		// A new compose file can change any service's config (environment,
+		// ports, healthcheck), so every deployed service is brought up
+		// with it; compose itself recreates only those whose config
+		// actually differs. Services never deployed are left alone.
+		a.log.Printf("compose file changed (%s -> %s): applying it to every deployed service", shortHash(current), shortHash(compose))
+		for i := range proj.Services {
+			svc := &proj.Services[i]
+			ss := st.Services[svc.Name]
+			if ss == nil || ss.Current == "" || slices.ContainsFunc(changed, func(r release) bool { return r.svc == svc }) {
+				continue
+			}
+			changed = append(changed, release{svc: svc, ref: ss.Current, tag: ss.CurrentTag, digest: ss.Current})
+		}
 	}
 	if len(changed) == 0 {
 		a.log.Printf("nothing to deploy for %q", proj.Name)
@@ -249,9 +296,15 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 		a.recordUntouched(proj, st, changed, resultPreDeployFailed)
 		return fmt.Errorf("pre_deploy failed: %w (nothing was changed)", err)
 	}
+	// After the backup, so a migration that goes wrong has one to go back
+	// to; before the swap, so the new release starts on a ready database.
+	if err := a.preSwap(dctx, newProj, st, changed); err != nil {
+		a.recordUntouched(proj, st, changed, resultPreSwapFailed)
+		return fmt.Errorf("pre_swap failed: %w (nothing was changed)", err)
+	}
 
 	a.log.Printf("deploying %s", describe(changed))
-	deployErr := a.start(dctx, proj, st, changed)
+	deployErr := a.start(dctx, newProj, st, changed)
 	now := a.now().UTC()
 	for _, r := range changed {
 		ss := st.service(r.svc)
@@ -263,8 +316,14 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 			ss.Previous, ss.PreviousTag = ss.Current, ss.CurrentTag
 			ss.Current, ss.CurrentTag, ss.CurrentSince, ss.LastResult = r.digest, r.tag, now, resultHealthy
 		}
+		if composeChanged {
+			st.Compose = &ComposeState{Current: compose, Previous: current, CurrentSince: now}
+		}
 		if err := st.save(a.cfg.StateDir, proj.Name); err != nil {
 			return fmt.Errorf("deploy succeeded but recording it failed: %w", err)
+		}
+		if err := st.pruneCompose(a.cfg.StateDir, proj.Name); err != nil {
+			a.log.Printf("warning: removing old compose files: %v", err)
 		}
 		a.log.Printf("deployed %q: %s", proj.Name, describe(changed))
 		return nil
@@ -275,7 +334,8 @@ func (a *Agent) deploy(ctx context.Context, proj *Project, st *State, releases [
 	// host gave up): half-deployed is the worst state to leave behind.
 	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), proj.timeout())
 	defer rbCancel()
-	rbErr := a.rollback(rbCtx, proj, st, changed)
+	// Back on the compose file the running release was deployed with.
+	rbErr := a.rollback(rbCtx, oldProj, st, changed)
 
 	if err := st.save(a.cfg.StateDir, proj.Name); err != nil {
 		a.log.Printf("warning: recording the failed deploy: %v", err)
@@ -301,17 +361,23 @@ func (a *Agent) recordUntouched(proj *Project, st *State, rs []release, result s
 // preDeploy runs the project's pre_deploy command, if it has one, with
 // what's about to change in its environment.
 func (a *Agent) preDeploy(ctx context.Context, proj *Project, changed []release) error {
-	if proj.PreDeploy == "" {
-		return nil
-	}
 	var parts []string
 	for _, r := range changed {
 		parts = append(parts, r.svc.Name+"="+shortLabel(r))
 	}
+	return a.runPreDeploy(ctx, proj, filepath.Dir(proj.ComposeFile), serviceNames(changed), parts)
+}
+
+// runPreDeploy runs pre_deploy (sh -c, from dir) with J_CICD_SERVICES set
+// to names (services or files) and J_CICD_RELEASE to parts (name=release).
+func (a *Agent) runPreDeploy(ctx context.Context, proj *Project, dir string, names, parts []string) error {
+	if proj.PreDeploy == "" {
+		return nil
+	}
 	a.log.Printf("pre_deploy: %s", proj.PreDeploy)
-	return a.runner.Run(ctx, filepath.Dir(proj.ComposeFile), "env",
+	return a.runner.Run(ctx, dir, "env",
 		"J_CICD_PROJECT="+proj.Name,
-		"J_CICD_SERVICES="+strings.Join(serviceNames(changed), " "),
+		"J_CICD_SERVICES="+strings.Join(names, " "),
 		"J_CICD_RELEASE="+strings.Join(parts, " "),
 		"sh", "-c", proj.PreDeploy)
 }
@@ -445,7 +511,16 @@ func (a *Agent) composeOutput(ctx context.Context, proj *Project, env []string, 
 // CommandRunner needing an environment parameter.
 func composeArgv(proj *Project, env []string, args []string) (string, []string) {
 	argv := append([]string{}, env...)
-	argv = append(argv, "docker", "compose", "-f", proj.ComposeFile)
+	argv = append(argv, "docker", "compose")
+	if proj.inUse != "" {
+		// A release's compose file lives in the state dir; keep the
+		// configured file's directory as the project directory so the
+		// compose project (and its containers) and relative paths in the
+		// file are the same as ever.
+		argv = append(argv, "--project-directory", filepath.Dir(proj.ComposeFile), "-f", proj.inUse)
+	} else {
+		argv = append(argv, "-f", proj.ComposeFile)
+	}
 	if proj.EnvFile != "" {
 		argv = append(argv, "--env-file", proj.EnvFile)
 	}
@@ -593,4 +668,23 @@ func shortLabel(r release) string {
 		return r.tag
 	}
 	return ShortDigest(r.digest)
+}
+
+// withCompose returns proj set up to run the compose file with the given
+// hash ("" for the configured file).
+func (a *Agent) withCompose(proj *Project, hash string) *Project {
+	if hash == "" {
+		return proj
+	}
+	p := *proj
+	p.inUse = composePath(a.cfg.StateDir, proj.Name, hash)
+	return &p
+}
+
+// shortHash names a compose file by hash for humans.
+func shortHash(hash string) string {
+	if hash == "" {
+		return "configured file"
+	}
+	return "sha256:" + shortID(hash)
 }

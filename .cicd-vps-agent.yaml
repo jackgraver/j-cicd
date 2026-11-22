@@ -1,0 +1,22 @@
+# The deploy agent on the VPS, deployed by itself: a static linux/amd64
+# build sent to the running agent, which installs it over its own binary
+# (a rename, so the running process is unaffected) and checks that the new
+# one reports this commit. Registered separately from j-cicd itself:
+#
+#   j-cicd add ~/Projects/j-cicd --config ~/Projects/j-cicd/.cicd-vps-agent.yaml
+#
+# The first agent that understands artifacts has to be copied by hand.
+name: j-cicd-vps-agent
+branch: main
+steps:
+  - name: test
+    run: go test ./...
+  - name: build
+    run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X main.version=$J_CICD_REVISION" -o dist/j-cicd-agent-linux-amd64 ./cmd/j-cicd-agent
+artifacts:
+  - name: j-cicd-agent
+    path: dist/j-cicd-agent-linux-amd64
+deploy:
+  host: st-vps
+  command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml $HOME/.local/bin/j-cicd-agent
+  project: j-cicd-agent

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
@@ -43,9 +44,16 @@ type Options struct {
 	// Echo, if set, also receives everything written to the run log (the
 	// CLI passes stderr so a foreground run is visible as it happens).
 	Echo io.Writer
+	// Progress, if set (and Echo isn't), receives a concise account of the
+	// run instead: one line per stage, any warnings, and, if the run
+	// fails, the last lines of the failing command's output. The full
+	// output is still recorded in the run log either way.
+	Progress io.Writer
 	// Runner overrides how commands execute; nil means real processes.
 	// Tests substitute a fake here.
 	Runner pipeline.CommandRunner
+	// beforeDeploy is pipeline.Options.BeforeDeploy; MergePR sets it.
+	beforeDeploy func(context.Context) error
 }
 
 // ErrBusy means the project already has a run in progress. Two pipelines
@@ -103,20 +111,31 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 		}
 	}
 
+	// How the built commit relates to its remote, so nobody has to guess
+	// whether "main" meant the local branch or origin's.
+	ref := "HEAD"
+	if rel != nil {
+		ref = rel.branch
+	}
+	syncNote := syncWarning(ctx, dir, ref)
+
 	return record(ctx, st, store.Run{
 		Project:  t.Name,
 		Dir:      dir,
 		Config:   configPath,
 		Revision: revision,
 		Push:     opts.Push,
-	}, opts, fmt.Sprintf("of %q in %s", t.Name, dir), func(out io.Writer, logger *log.Logger) error {
+	}, opts, fmt.Sprintf("of %q in %s", t.Name, dir), func(env *runEnv) error {
 		if !hasRevision && relErr == nil {
-			logger.Printf("no git revision for %s — images will only be tagged \"latest\"", dir)
+			env.log.Printf("no git revision for %s — images will only be tagged \"latest\"", dir)
 		}
 		if relErr != nil {
 			return relErr
 		}
-		return prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, out, logger)
+		if syncNote != "" {
+			env.warnf("%s", syncNote)
+		}
+		return prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, rel, opts, env)
 	})
 }
 
@@ -141,12 +160,12 @@ func Rollback(ctx context.Context, st *store.Store, t Target, opts Options) (sto
 		Kind:    store.KindRollback,
 		Dir:     dir,
 		Config:  configPath,
-	}, opts, fmt.Sprintf("rolling back %q's last deploy", t.Name), func(out io.Writer, logger *log.Logger) error {
+	}, opts, fmt.Sprintf("rolling back %q's last deploy", t.Name), func(env *runEnv) error {
 		cfg, err := config.Load(configPath, "")
 		if err != nil {
 			return &ConfigError{Err: err}
 		}
-		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, out), Logger: logger})
+		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages})
 		if err := p.Rollback(ctx, cfg); err != nil {
 			if ctx.Err() != nil {
 				return fmt.Errorf("cancelled: %w", err)
@@ -181,24 +200,68 @@ func absPaths(t Target) (dir, configPath string, err error) {
 	return dir, configPath, nil
 }
 
-// record starts r in the store, logs its ID and what it is, runs fn with a
-// logger writing to the run's log (and opts.Echo), and records how it
-// ended. A run is recorded even
-// when fn fails before doing anything, so it shows up in history.
-func record(ctx context.Context, st *store.Store, r store.Run, opts Options, what string, fn func(io.Writer, *log.Logger) error) (store.Run, error) {
+// runEnv is what a run's body gets from record: where its output goes,
+// and the run record it can add results to before it is finished.
+type runEnv struct {
+	// out receives command output: the run log, plus the echo and the
+	// failure tail when those are on.
+	out io.Writer
+	// log writes timestamped lines to the run log (and the echo).
+	log *log.Logger
+	// progress is the concise stream, or nil (see Options.Progress).
+	progress io.Writer
+	// stages is progress for the pipeline's stage lines: each one starts a
+	// new command, so it also discards the output kept so far, and a
+	// failure's tail is that stage's output alone. nil without progress.
+	stages io.Writer
+	run    *store.Run
+	// warnings collects every warnf, for callers that report them
+	// themselves (Plan).
+	warnings []string
+}
+
+// warnf records a warning in the log and, in concise mode, on the
+// progress stream, where it would otherwise be lost among hidden output.
+func (e *runEnv) warnf(format string, args ...any) {
+	e.warnings = append(e.warnings, fmt.Sprintf(format, args...))
+	e.log.Printf("warning: "+format, args...)
+	if e.progress != nil {
+		fmt.Fprintf(e.progress, "warning: "+format+"\n", args...)
+	}
+}
+
+// tailLines is how much of a failed command's output concise mode shows.
+const tailLines = 40
+
+// record starts r in the store, logs its ID and what it is, runs fn with
+// the run's output wiring, and records how it ended. A run is recorded
+// even when fn fails before doing anything, so it shows up in history.
+func record(ctx context.Context, st *store.Store, r store.Run, opts Options, what string, fn func(*runEnv) error) (store.Run, error) {
 	h, err := st.StartRun(r)
 	if err != nil {
 		return store.Run{}, err
 	}
 
-	out := io.Writer(h.Log)
+	logOut := io.Writer(h.Log)
+	var progress io.Writer
+	var tail *tailWriter
+	cmdOut := io.Writer(h.Log)
 	if opts.Echo != nil {
-		out = io.MultiWriter(h.Log, opts.Echo)
+		logOut = io.MultiWriter(h.Log, opts.Echo)
+		cmdOut = logOut
+	} else if opts.Progress != nil {
+		progress, tail = opts.Progress, newTail(tailLines)
+		cmdOut = io.MultiWriter(h.Log, tail)
+		fmt.Fprintf(progress, "run %s started\n", h.Run.ID)
 	}
-	logger := log.New(out, "", log.LstdFlags)
+	logger := log.New(logOut, "", log.LstdFlags)
 	logger.Printf("run %s %s", h.Run.ID, what)
 
-	runErr := fn(out, logger)
+	env := &runEnv{out: cmdOut, log: logger, progress: progress, run: &h.Run}
+	if progress != nil {
+		env.stages = &stageWriter{w: progress, tail: tail}
+	}
+	runErr := fn(env)
 
 	status := store.StatusSuccess
 	switch {
@@ -212,6 +275,9 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	if runErr != nil {
 		errMsg = runErr.Error()
 		logger.Printf("run %s: %v", status, runErr)
+		if lines := tailLinesOf(tail); progress != nil && len(lines) > 0 {
+			fmt.Fprintf(progress, "--- last %d lines of output (full log: j-cicd logs %s) ---\n%s\n---\n", len(lines), h.Run.ID, strings.Join(lines, "\n"))
+		}
 	} else {
 		logger.Printf("run succeeded")
 	}
@@ -222,37 +288,80 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	return h.Run, runErr
 }
 
+// stageWriter forwards stage lines and forgets the output before them.
+type stageWriter struct {
+	w    io.Writer
+	tail *tailWriter
+}
+
+func (s *stageWriter) Write(p []byte) (int, error) {
+	s.tail.reset()
+	return s.w.Write(p)
+}
+
+func tailLinesOf(t *tailWriter) []string {
+	if t == nil {
+		return nil
+	}
+	return t.Lines()
+}
+
 // runnerFor is opts.Runner, else real processes writing to out. One
 // writer for both streams keeps stdout and stderr in the order they were
 // written.
-func runnerFor(opts Options, out io.Writer) pipeline.CommandRunner {
+func runnerFor(opts Options, out io.Writer, env ...string) pipeline.CommandRunner {
 	if opts.Runner != nil {
 		return opts.Runner
 	}
-	return pipeline.ExecRunner{Stdout: out, Stderr: out}
+	return pipeline.ExecRunner{Stdout: out, Stderr: out, Env: env}
 }
 
-// prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
-// fresh snapshot of the release commit that is removed afterwards.
-func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revision string, rel *release, opts Options, out io.Writer, logger *log.Logger) error {
+// stepEnv is what every step and docker command gets on top of j-cicd's
+// own environment: J_CICD_REVISION, the revision the images are tagged
+// with, so a step can stamp it into what it builds (a version.json that a
+// deploy.verify check then looks for).
+func stepEnv(revision string) []string {
+	if revision == "" {
+		return nil
+	}
+	return []string{"J_CICD_REVISION=" + revision}
+}
+
+// prepared is a pipeline ready to run: the directory to run it in, its
+// config, and how to clean up (remove the snapshot, if there is one).
+type prepared struct {
+	dir     string
+	cfg     *config.Config
+	cleanup func()
+}
+
+// prepare resolves what a run builds. Without a release it's the project
+// directory and its config. With one it's a fresh snapshot of the release
+// commit, with the config as committed there. snapDir is where the
+// snapshot goes.
+func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel *release, env *runEnv) (*prepared, error) {
 	if rel == nil {
 		cfg, err := config.Load(configPath, revision)
 		if err != nil {
-			return &ConfigError{Err: err}
+			return nil, &ConfigError{Err: err}
 		}
-		return execute(ctx, dir, cfg, revision, opts, out, logger)
+		return &prepared{dir: dir, cfg: cfg, cleanup: func() {}}, nil
 	}
 
-	logger.Printf("building branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
-	snap, err := createSnapshot(ctx, root, project, dir, rel)
-	if err != nil {
-		return err
+	if rel.pr > 0 {
+		env.log.Printf("building PR #%d merged onto %s (merge commit %s) from a clean checkout; nothing in %s is included", rel.pr, rel.branch, rel.revision, dir)
+	} else {
+		env.log.Printf("building the local branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
 	}
-	defer func() {
+	snap, err := createSnapshot(ctx, snapDir, dir, rel)
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
 		if err := snap.remove(); err != nil {
-			logger.Printf("warning: couldn't remove snapshot %s: %v", snap.dir, err)
+			env.warnf("couldn't remove snapshot %s: %v", snap.dir, err)
 		}
-	}()
+	}
 	buildDir := filepath.Join(snap.dir, rel.prefix)
 
 	// The config is part of what's released, so it comes from the commit
@@ -260,30 +369,58 @@ func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revi
 	if inside, err := filepath.Rel(dir, configPath); err == nil && inside != ".." && !strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
 		configPath = filepath.Join(buildDir, inside)
 		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-			return &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
+			cleanup()
+			return nil, &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
 		}
 	}
 	cfg, err := config.Load(configPath, revision)
 	if err != nil {
-		return &ConfigError{Err: err}
+		cleanup()
+		return nil, &ConfigError{Err: err}
 	}
-	if cfg.Branch != rel.branch {
-		logger.Printf("warning: the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
+	if rel.pr == 0 && cfg.Branch != rel.branch {
+		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
 	}
-	return execute(ctx, buildDir, cfg, revision, opts, out, logger)
+	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil
 }
 
-func execute(ctx context.Context, dir string, cfg *config.Config, revision string, opts Options, out io.Writer, logger *log.Logger) error {
-	runner := runnerFor(opts, out)
+// prepareAndExecute runs the pipeline in dir, or, when rel is set, in a
+// fresh snapshot of the release commit that is removed afterwards.
+func prepareAndExecute(ctx context.Context, root, project, dir, configPath, revision string, rel *release, opts Options, env *runEnv) error {
+	prep, err := prepare(ctx, snapshotDir(root, project), dir, configPath, revision, rel, env)
+	if err != nil {
+		return err
+	}
+	defer prep.cleanup()
+	return execute(ctx, prep.dir, prep.cfg, revision, opts, env)
+}
+
+func execute(ctx context.Context, dir string, cfg *config.Config, revision string, opts Options, env *runEnv) error {
 	p := pipeline.New(dir, pipeline.Options{
 		Push:        opts.Push,
 		Deploy:      opts.Deploy,
 		Revision:    revision,
 		DeployDirty: opts.DeployDirty,
-		Runner:      runner,
-		Logger:      logger,
+		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
+		Logger:      env.log,
+		Progress:    env.stages,
+
+		BeforeDeploy: opts.beforeDeploy,
 	})
-	if err := p.Run(ctx, cfg); err != nil {
+	err := p.Run(ctx, cfg)
+	for _, img := range p.Images() {
+		env.run.Images = append(env.run.Images, store.RunImage{Name: img.Name, Repository: img.Repository, Tags: img.Tags, Digest: img.Digest})
+	}
+	for _, v := range p.Verified() {
+		env.run.Verified = append(env.run.Verified, store.RunVerify{URL: v.URL, Attempts: v.Attempts, Seconds: v.Duration.Round(100 * time.Millisecond).Seconds()})
+	}
+	for _, a := range p.Artifacts() {
+		env.run.Artifacts = append(env.run.Artifacts, store.RunArtifact{Name: a.Name, Path: filepath.ToSlash(a.Path), SHA256: a.SHA256, Size: a.Size})
+	}
+	if p.Deployed() {
+		env.run.Deployed, env.run.DeployHost = true, cfg.Deploy.Target()
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("cancelled: %w", err)
 		}

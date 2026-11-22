@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,10 @@ const (
 	resultNoRollback      = "failed, no previous release to roll back to"
 	resultUntouched       = "failed to pull, nothing changed"
 	resultPreDeployFailed = "pre_deploy failed, nothing changed"
+	resultPreSwapFailed   = "pre_swap failed, nothing changed"
+	resultReceiveFailed   = "artifacts not received, nothing changed"
+	resultPreflightFailed = "preflight failed, nothing changed"
+	resultInstallFailed   = "install failed, nothing changed"
 )
 
 // State is what the agent remembers about one project between deploys:
@@ -25,11 +31,99 @@ const (
 // interrogating docker, and survives restarts.
 type State struct {
 	Services map[string]*ServiceState `json:"services"`
+	// Compose tracks the compose file releases were deployed with, when
+	// the build host sends one (deploy.compose_file in .cicd.yaml). Nil
+	// means every deploy so far used the file in the agent's config.
+	Compose *ComposeState `json:"compose,omitempty"`
 }
 
-// ServiceState tracks one compose service.
+// ComposeState is the compose file that goes with Current, and the one
+// before it, by the sha256 of their contents ("" meaning the file named
+// in the agent config). The files themselves are kept in
+// <state_dir>/<project>.compose/<sha256>.yml.
+type ComposeState struct {
+	Current  string `json:"current,omitempty"`
+	Previous string `json:"previous,omitempty"`
+	// CurrentSince is when Current was deployed; equal to the services'
+	// CurrentSince when the same deploy changed both.
+	CurrentSince time.Time `json:"current_since,omitzero"`
+}
+
+// composeCurrent is the hash of the compose file in use ("" for the
+// configured one).
+func (s *State) composeCurrent() string {
+	if s.Compose == nil {
+		return ""
+	}
+	return s.Compose.Current
+}
+
+func composeDir(stateDir, project string) string {
+	return filepath.Join(stateDir, project+".compose")
+}
+
+func composePath(stateDir, project, hash string) string {
+	return filepath.Join(composeDir(stateDir, project), hash+".yml")
+}
+
+// storeCompose saves a compose file sent with a deploy under its content
+// hash and returns the hash. Storing the same file twice is a no-op.
+func storeCompose(stateDir, project string, data []byte) (string, error) {
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	dir := composeDir(stateDir, project)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := composePath(stateDir, project, hash)
+	if _, err := os.Stat(path); err == nil {
+		return hash, nil
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	return hash, os.Rename(tmp.Name(), path)
+}
+
+// pruneCompose deletes stored compose files other than the current and
+// previous ones: nothing can roll back further than that.
+func (s *State) pruneCompose(stateDir, project string) error {
+	entries, err := os.ReadDir(composeDir(stateDir, project))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	keep := map[string]bool{}
+	if s.Compose != nil {
+		keep[s.Compose.Current+".yml"] = true
+		keep[s.Compose.Previous+".yml"] = true
+	}
+	for _, e := range entries {
+		if !keep[e.Name()] {
+			if err := os.Remove(filepath.Join(composeDir(stateDir, project), e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ServiceState tracks one compose service, or one file of a files
+// project (keyed by file name; Current and Previous are then
+// sha256:<hex> and the tags are the revisions they were built from).
 type ServiceState struct {
-	Repository string `json:"repository"`
+	Repository string `json:"repository,omitempty"`
 	// Current is the last release that passed its health check, as
 	// repo@sha256:...: what should be running, and the rollback target
 	// for the next deploy.

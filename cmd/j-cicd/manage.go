@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -107,7 +108,8 @@ func cmdRemove(args []string) error {
 
 func cmdList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	if _, err := parseFlagsOnly(fs, args, "", 0, 0); err != nil {
+	asJSON := fs.Bool("json", false, "print projects as a JSON array on stdout")
+	if _, err := parseFlagsOnly(fs, args, "[--json]", 0, 0); err != nil {
 		return err
 	}
 	st, err := openStore()
@@ -118,13 +120,31 @@ func cmdList(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(projects) == 0 {
-		log.Printf("no projects registered yet — add one with: j-cicd add <project-dir>")
-		return nil
-	}
 	last, err := st.LastRuns()
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		type jsonProject struct {
+			Name    string   `json:"name"`
+			Dir     string   `json:"dir"`
+			Config  string   `json:"config,omitempty"`
+			LastRun *jsonRun `json:"last_run"`
+		}
+		out := make([]jsonProject, 0, len(projects))
+		for _, p := range projects {
+			jp := jsonProject{Name: p.Name, Dir: p.Dir, Config: p.Config}
+			if r, ok := last[p.Name]; ok {
+				jr := toJSONRun(r)
+				jp.LastRun = &jr
+			}
+			out = append(out, jp)
+		}
+		return printJSON(out)
+	}
+	if len(projects) == 0 {
+		log.Printf("no projects registered yet — add one with: j-cicd add <project-dir>")
+		return nil
 	}
 
 	now := time.Now()
@@ -148,7 +168,8 @@ func cmdList(args []string) error {
 func cmdHistory(args []string) error {
 	fs := flag.NewFlagSet("history", flag.ContinueOnError)
 	limit := fs.Int("n", 20, "show at most this many runs (0 for all)")
-	pos, err := parseFlagsOnly(fs, args, "[name] [-n count]", 0, 1)
+	asJSON := fs.Bool("json", false, "print runs as a JSON array on stdout (newest first)")
+	pos, err := parseFlagsOnly(fs, args, "[name] [-n count] [--json]", 0, 1)
 	if err != nil {
 		return err
 	}
@@ -163,6 +184,9 @@ func cmdHistory(args []string) error {
 	runs, err := st.Runs(project, *limit)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return printJSON(toJSONRuns(runs))
 	}
 	if len(runs) == 0 {
 		log.Printf("no runs recorded yet")
@@ -200,7 +224,8 @@ func findRun(st *store.Store, ref string) (store.Run, error) {
 func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	follow := fs.Bool("f", false, "keep printing output until the run finishes")
-	pos, err := parseFlagsOnly(fs, args, "<run-id|name> [-f]", 1, 1)
+	tail := fs.Int("tail", 0, "print only the last N lines (0 for all)")
+	pos, err := parseFlagsOnly(fs, args, "<run-id|name> [-f] [--tail N]", 1, 1)
 	if err != nil {
 		return err
 	}
@@ -217,6 +242,15 @@ func cmdLogs(args []string) error {
 		return err
 	}
 	defer f.Close()
+
+	if *tail > 0 && !*follow {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(lastLines(data, *tail))
+		return err
+	}
 
 	for {
 		if _, err := io.Copy(os.Stdout, f); err != nil {
@@ -239,6 +273,19 @@ func cmdLogs(args []string) error {
 		log.Printf("run %s %s", r.ID, r.Status)
 	}
 	return nil
+}
+
+// lastLines returns the last n lines of data.
+func lastLines(data []byte, n int) []byte {
+	end := len(data)
+	for ; n > 0 && end > 0; n-- {
+		i := bytes.LastIndexByte(data[:end-1], '\n')
+		if i < 0 {
+			return data
+		}
+		end = i + 1
+	}
+	return data[end:]
 }
 
 func cmdCancel(args []string) error {

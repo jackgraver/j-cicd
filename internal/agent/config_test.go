@@ -46,16 +46,20 @@ func TestLoadConfigRejects(t *testing.T) {
 	}
 	head := "projects:\n  - name: st\n    compose_file: /c.yml\n    services:\n"
 	cases := map[string]struct{ body, want string }{
-		"empty":           {"", "empty"},
-		"no projects":     {"state_dir: /x\n", "at least one project"},
-		"typo":            {strings.Replace(validConfig, "compose_file", "compose", 1), "compose"},
-		"bad name":        {strings.Replace(validConfig, "simple-track", "../etc", 1), "must contain only"},
-		"no compose file": {"projects:\n  - name: st\n    services:\n" + svc("be", "BE", "r"), "compose_file is required"},
-		"no services":     {"projects:\n  - name: st\n    compose_file: /c.yml\n", "at least one service"},
-		"bad var":         {head + svc("be", "BE-IMAGE", "r"), "not a valid variable name"},
-		"dup repository":  {head + svc("be", "A", "r") + svc("fe", "B", "r"), "mapped to two services"},
-		"dup var":         {head + svc("be", "A", "r1") + svc("fe", "A", "r2"), "used by two services"},
-		"dup service":     {head + svc("be", "A", "r1") + svc("be", "B", "r2"), "listed twice"},
+		"empty":                    {"", "empty"},
+		"no projects":              {"state_dir: /x\n", "at least one project"},
+		"typo":                     {strings.Replace(validConfig, "compose_file", "compose", 1), "compose"},
+		"bad name":                 {strings.Replace(validConfig, "simple-track", "../etc", 1), "must contain only"},
+		"no compose file":          {"projects:\n  - name: st\n    services:\n" + svc("be", "BE", "r"), "compose_file is required"},
+		"no services":              {"projects:\n  - name: st\n    compose_file: /c.yml\n", "at least one service"},
+		"bad var":                  {head + svc("be", "BE-IMAGE", "r"), "not a valid variable name"},
+		"dup repository":           {head + svc("be", "A", "r") + svc("fe", "B", "r"), "mapped to two services"},
+		"dup var":                  {head + svc("be", "A", "r1") + svc("fe", "A", "r2"), "used by two services"},
+		"dup service":              {head + svc("be", "A", "r1") + svc("be", "B", "r2"), "listed twice"},
+		"pre_swap unknown service": {validConfig + "    pre_swap: {service: frontend, command: [x]}\n", "must be one of the project's services"},
+		"pre_swap no command":      {validConfig + "    pre_swap: {service: backend}\n", "pre_swap.command is required"},
+		"pre_swap string command":  {validConfig + "    pre_swap: {service: backend, command: /app/migrate up}\n", "cannot unmarshal"},
+		"pre_swap typo":            {validConfig + "    pre_swap: {service: backend, cmd: [x]}\n", "cmd"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"j-cicd/internal/config"
@@ -43,17 +46,39 @@ type Options struct {
 	Runner CommandRunner
 	// Logger receives progress output. Nil means the standard logger.
 	Logger *log.Logger
+	// HTTPClient makes the post-deploy verify requests. Nil means a client
+	// with a short per-request timeout.
+	HTTPClient *http.Client
+	// VerifyInterval is the pause between verify attempts. Zero means
+	// DefaultVerifyInterval.
+	VerifyInterval time.Duration
+	// Progress, if set, receives one short line per stage ("building
+	// image backend") — what a caller that hides the commands' own output
+	// still shows. Nil means none.
+	Progress io.Writer
+	// BeforeDeploy, if set, runs right before the deploy stage; an error
+	// from it fails the run with nothing deployed. Nil means no check.
+	BeforeDeploy func(context.Context) error
 }
 
 // Pipeline runs one project's pipeline.
 type Pipeline struct {
-	projectDir  string
-	push        bool
-	deploy      bool
-	revision    string
-	deployDirty bool
-	runner      CommandRunner
-	log         *log.Logger
+	projectDir   string
+	push         bool
+	deploy       bool
+	revision     string
+	deployDirty  bool
+	runner       CommandRunner
+	log          *log.Logger
+	progress     io.Writer
+	beforeDeploy func(context.Context) error
+	httpClient   *http.Client
+	verifyEvery  time.Duration
+	// Results a caller can read once Run returns.
+	images    []ImageResult
+	artifacts []ArtifactResult
+	deployed  bool
+	verified  []VerifyResult
 	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
 	// it; the real one probes the local socket.
 	inspectDocker func() dockerDiagnosis
@@ -62,13 +87,17 @@ type Pipeline struct {
 // New returns a Pipeline that runs commands against projectDir.
 func New(projectDir string, opts Options) *Pipeline {
 	p := &Pipeline{
-		projectDir:  projectDir,
-		push:        opts.Push,
-		deploy:      opts.Deploy,
-		revision:    opts.Revision,
-		deployDirty: opts.DeployDirty,
-		runner:      opts.Runner,
-		log:         opts.Logger,
+		projectDir:   projectDir,
+		push:         opts.Push,
+		deploy:       opts.Deploy,
+		revision:     opts.Revision,
+		deployDirty:  opts.DeployDirty,
+		runner:       opts.Runner,
+		log:          opts.Logger,
+		progress:     opts.Progress,
+		beforeDeploy: opts.BeforeDeploy,
+		httpClient:   opts.HTTPClient,
+		verifyEvery:  opts.VerifyInterval,
 
 		inspectDocker: inspectDockerHost,
 	}
@@ -77,6 +106,12 @@ func New(projectDir string, opts Options) *Pipeline {
 	}
 	if p.log == nil {
 		p.log = log.Default()
+	}
+	if p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if p.verifyEvery <= 0 {
+		p.verifyEvery = DefaultVerifyInterval
 	}
 	return p
 }
@@ -115,6 +150,7 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		if step.Dir != "" {
 			dir = filepath.Join(p.projectDir, step.Dir)
 		}
+		p.say("step %s", step.Name)
 		p.log.Printf("[%s] %s", step.Name, step.Run)
 		timeout := cfg.StepTimeout(step, DefaultTimeout)
 		if err := p.exec(ctx, timeout, dir, "sh", "-c", step.Run); err != nil {
@@ -125,6 +161,7 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 	timeout := cfg.ImageTimeout(DefaultTimeout)
 	for i := range cfg.Images {
 		img := &cfg.Images[i]
+		p.say("building image %s", img.Label())
 		if err := p.buildImage(ctx, timeout, img); err != nil {
 			return fmt.Errorf("docker build (%s) failed: %w", img.Label(), err)
 		}
@@ -132,25 +169,90 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 			p.log.Printf("skipping push for %s (--no-push)", img.Label())
 			continue
 		}
+		p.say("pushing image %s", img.Label())
 		if err := p.pushImage(ctx, timeout, img); err != nil {
 			return fmt.Errorf("docker push (%s) failed: %w", img.Label(), err)
 		}
+		p.images = append(p.images, ImageResult{
+			Name:       img.Label(),
+			Repository: img.Repository,
+			Tags:       img.Tags,
+			Digest:     p.pushedDigest(ctx, img),
+		})
+	}
+
+	if err := p.collectArtifacts(cfg); err != nil {
+		return err
 	}
 
 	switch {
 	case cfg.Deploy == nil:
 	case !p.push:
-		p.log.Printf("skipping deploy (--no-push: nothing new in the registry to deploy)")
+		p.log.Printf("skipping deploy (--no-push: a build-only run publishes nothing)")
 	case !p.deploy:
 		p.log.Printf("skipping deploy (--no-deploy)")
 	default:
+		target := cfg.Deploy.Target()
+		if p.beforeDeploy != nil {
+			if err := p.beforeDeploy(ctx); err != nil {
+				return fmt.Errorf("not deploying: %w", err)
+			}
+		}
+		p.say("deploying to %s", target)
 		if err := p.runDeploy(ctx, cfg, deployRefs); err != nil {
-			return fmt.Errorf("deploy to %s failed: %w", cfg.Deploy.Host, err)
+			return fmt.Errorf("deploy to %s failed: %w", target, err)
+		}
+		p.deployed = true
+		if err := p.verify(ctx, cfg); err != nil {
+			return fmt.Errorf("deployed to %s, but %w (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}
 
 	p.log.Printf("pipeline for %q completed successfully", cfg.Name)
 	return nil
+}
+
+// say writes one progress line, if anyone is listening.
+func (p *Pipeline) say(format string, args ...any) {
+	if p.progress != nil {
+		fmt.Fprintf(p.progress, "• "+format+"\n", args...)
+	}
+}
+
+// ImageResult is an image Run pushed.
+type ImageResult struct {
+	Name, Repository string
+	Tags             []string
+	// Digest is the registry's content hash (sha256:...), "" if it
+	// couldn't be read back.
+	Digest string
+}
+
+// Images returns the images the last Run pushed, in images: order.
+func (p *Pipeline) Images() []ImageResult { return p.images }
+
+// Deployed reports whether the last Run's deploy stage completed.
+func (p *Pipeline) Deployed() bool { return p.deployed }
+
+// pushedDigest reads back the registry digest the push of img resolved to
+// (docker records it as a RepoDigest once pushed). It's informational, so
+// a failure logs and yields "" rather than failing a run that pushed fine.
+func (p *Pipeline) pushedDigest(ctx context.Context, img *config.Image) string {
+	if len(img.Tags) == 0 {
+		return ""
+	}
+	out, err := p.output(ctx, time.Minute, "", "docker", "image", "inspect",
+		"--format", "{{range .RepoDigests}}{{println .}}{{end}}", ref(img, img.Tags[0]))
+	if err != nil {
+		p.log.Printf("[%s] warning: couldn't read back the pushed digest: %v", img.Label(), err)
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if digest, ok := strings.CutPrefix(strings.TrimSpace(line), img.Repository+"@"); ok {
+			return digest
+		}
+	}
+	return ""
 }
 
 // exec runs one command under its own deadline, turning an expired

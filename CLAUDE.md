@@ -41,8 +41,16 @@ resolved to, recreates only the compose services whose digest changed,
 waits for their healthchecks, and rolls back to the last healthy release
 on failure; its exit status passes or fails the run. An optional
 `pre_deploy` command in the agent's config (e.g. a database backup) runs
-before any container changes. `j-cicd rollback <name>` (or `R` in the
-dashboard) reverts the last deploy by hand — images only, never the
+before any container changes, and an optional `pre_swap` command (e.g.
+database migrations) then runs once inside one service's *new* image via
+`docker compose run`; a failure or timeout of either aborts the deploy with
+nothing changed. Projects that ship binaries instead of images (a CLI,
+a systemd service) list them under `artifacts:`; the deploy sends the files
+by sha256 and the agent installs them atomically, restarts their unit,
+waits for it to stay up, runs a check, and rolls back the same way — on
+the VPS over ssh, or on this machine with `deploy.local` (j-cicd installs
+itself into `~/.local/bin` this way). `j-cicd rollback <name>` (or `R` in the
+dashboard) reverts the last deploy by hand — images or files, never the
 database — and is recorded in history as a `rollback` run. See [AGENT.md](AGENT.md) for the
 design and VPS setup. Not yet implemented: the stretch-goal
 failure-investigation agent.
@@ -80,16 +88,60 @@ images:                 # optional list — omit if there's no docker stage
 Each entry in `images:` is built and (optionally) pushed independently, so
 multi-service projects just list one entry per service/Dockerfile.
 
+A project that ships files rather than images lists them as `artifacts:`
+(what its steps leave behind):
+
+```yaml
+artifacts:
+  - name: mini-bot          # what the agent's config calls it (files: name)
+    path: dist/mini-bot     # relative to the project dir
+```
+
+After the steps each must exist (a missing one fails the run by name); its
+sha256 identifies the release the way a digest does an image, and is
+recorded in the run (`artifacts` in `--json`). A deploy of artifacts
+streams them to the agent as a tar on the ssh connection's stdin,
+`j-cicd-agent deploy <project> name@sha256:<hex>... --artifacts-stdin
+--revision <rev>`; the agent refuses any file that doesn't hash to its ref.
+A deploy sends images or artifacts, never both: with both in the config,
+`deploy.images` or `deploy.artifacts` says which. Build-only runs
+(`--no-push`, `b`) still build and hash them, but don't deploy.
+
 An optional `deploy:` section hands the pushed images to the VPS:
 
 ```yaml
 deploy:
-  host: deploy@vps.example.com   # required: ssh destination or ~/.ssh/config alias
+  host: deploy@vps.example.com   # ssh destination or ~/.ssh/config alias
+  # local: true                  # instead of host: run the agent on this machine (sh -c, no ssh)
   command: j-cicd-agent          # optional: how to invoke the agent remotely
   project: my-project            # optional, default name: — the project in the agent's config
   images: [backend]              # optional, default all images: entries (by name)
+  # artifacts: [mini-bot]        # optional, the same for artifacts: entries
   timeout: 10m                   # optional, default the top-level timeout
+  compose_file: deploy/compose.yaml   # optional: sent with the deploy
+  verify:                        # optional: checks of the live site after the deploy
+    - url: https://app.example.com/version.json
+      expect_body_contains: "{{revision}}"   # default: any body
+      expect_status: 200                      # default 200
+      timeout: 2m                             # keep retrying this long (default 2m; 0 = once)
 ```
+
+**Post-deploy verify.** The agent only knows the containers are healthy;
+`verify:` asks the public site (from the build host, the way users reach it)
+whether it's serving this release. After a successful deploy each check
+GETs its URL (with a cache-busting query parameter and `Cache-Control:
+no-cache`), retrying every 3s until the status and body match or its
+timeout passes. `{{revision}}` in the url or body is the deployed
+revision. A failure fails the run (recorded with `deployed: true`, since
+the release *is* running) and the error names `j-cicd rollback <name>`; it
+never rolls back by itself. Each passed check is reported with how many attempts and seconds it took
+(the log, the concise output, and `verified` in the run's JSON). It doesn't run without a deploy (`--no-push`,
+`--no-deploy`). The app must expose its commit somewhere for this to be
+useful: every step and docker command gets `J_CICD_REVISION` in its
+environment (the same revision the images are tagged with), so a step like
+`echo "{\"commit\":\"$J_CICD_REVISION\"}" > public/version.json` before the
+image build is enough. The path should be served with `Cache-Control:
+no-store` so a cache can't answer for it.
 
 Deploy sends each image's per-commit tag (`repo:<revision>`), never
 `latest`; the agent turns it into a digest (`repo@sha256:...`, the
@@ -185,6 +237,24 @@ Docker come from the system packages):
   — a static agent binary to copy to the VPS.
 - `gofmt -l . && go vet ./... && go test ./...` — the checks.
 
+### Releasing j-cicd with j-cicd
+
+j-cicd builds and installs itself. Use that for real releases rather than
+`go install` by hand (the commands above are for development):
+
+- `j-cicd run j-cicd` (`.cicd.yaml`) — gofmt, vet, test, build both binaries
+  stamped with the commit, and have the local `j-cicd-agent` (config
+  `~/.config/j-cicd-agent.yaml`) install them into `~/.local/bin`. Both must
+  report the new commit from `version`, or the previous binaries go back.
+- `j-cicd run j-cicd-vps-agent` (`.cicd-vps-agent.yaml`, registered with
+  `--config`) — the static linux/amd64 agent, sent to the agent on the VPS,
+  which installs it over itself. This touches the VPS: ask first.
+
+Both have `branch: main`, so commit to `main` first; the run builds main's
+latest local commit, not the working tree. `j-cicd rollback j-cicd` (or
+`j-cicd-vps-agent`) reverts the last release, `--plan` previews a run, and
+`j-cicd logs j-cicd` has the output of a failed one.
+
 `version` prints `-X main.version=...` if set via `-ldflags`, otherwise the
 git revision Go stamps into the binary (`-dirty` for uncommitted changes),
 otherwise `dev`. Go only stamps that from a regular checkout — builds from a
@@ -197,17 +267,22 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd add [project-dir] [--name n] [--config path]` — register a
   project. The config must load; the name defaults to the config's `name:`.
 - `j-cicd remove <name>` — unregister (history and files are kept).
-- `j-cicd list` — projects with their latest result.
+- `j-cicd list [--json]` — projects with their latest result.
 - `j-cicd run [name|project-dir] [--config path] [--no-push] [--no-deploy]
-  [--deploy-dirty] [--quiet]` —
+  [--deploy-dirty] [--plan] [--json] [-v|--verbose] [--quiet]` —
   run a pipeline. A bare word that names a registered project runs it;
   anything path-like is a directory as before. A registered directory is
-  recorded under its registered name. `--quiet` only records output.
-- `j-cicd history [name] [-n count]` — recorded runs, newest first.
-- `j-cicd logs <run-id|name> [-f]` — a run's output (a name means its
-  latest run); `-f` follows it until it finishes.
+  recorded under its registered name. See **Output and agents** below for
+  `--plan`, `--json`, `-v` and `--quiet`.
+- `j-cicd merge <name|project-dir> <pr> [--plan] [--no-deploy] [--no-merge]
+  [--config path] [--json] [-v|--quiet]` — run a GitHub pull request through
+  the pipeline as if merged, and merge it if it passes. See **PR merges**.
+- `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
+- `j-cicd logs <run-id|name> [-f] [--tail N]` — a run's output (a name
+  means its latest run); `-f` follows it until it finishes, `--tail N`
+  prints only the last N lines.
 - `j-cicd cancel <run-id|name>` — stop a run in progress.
-- `j-cicd rollback [name|project-dir] [--config path] [--quiet]` — revert
+- `j-cicd rollback [name|project-dir] [--config path] [--json] [-v] [--quiet]` — revert
   the last deploy on the VPS via `j-cicd-agent rollback` over ssh, using
   the config's `deploy:` section. Recorded as a run of kind `rollback`.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
@@ -216,6 +291,10 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>... [--config path]` — on
   the VPS: deploy, health-check, roll back on failure. Normally run by
   `j-cicd run` over ssh rather than by hand.
+- `j-cicd-agent deploy <project> <name@sha256:...>... [--artifacts-stdin]
+  [--revision rev]` — the same for a files project: receive the files
+  (a tar on stdin), install, restart, check, roll back on failure. Without
+  `--artifacts-stdin` it deploys releases already in the agent's store.
 - `j-cicd-agent rollback <project> [--config path]` — put the services the
   last successful deploy changed back on their previous release (pull,
   `pre_deploy`, up, health check). Running it again undoes it.
@@ -230,6 +309,77 @@ Flags work on either side of positional arguments. Unknown flags and stray
 positional arguments are errors rather than being ignored. Exit codes: 0 ok,
 1 pipeline failed, 2 usage error, 3 config could not be loaded — the same
 for both binaries.
+
+## Output and agents
+
+j-cicd is used by people at a terminal and by scripts and AI agents, so
+output depends on who is reading:
+
+- **At a terminal** (stderr is a TTY), `run` streams everything as it
+  happens, as before.
+- **Anywhere else** (a pipe, a script, an agent) it prints a concise
+  account to stderr: `run <id> started`, one `• step <name>` /
+  `• building image <x>` / `• pushing image <x>` / `• deploying to <host>`
+  line per stage, any warnings, and, if the run fails, the last 40 lines of
+  the *failing stage's* output. The full output is always recorded;
+  `j-cicd logs <id>` (or `--tail N`) gets it.
+- `-v`/`--verbose` forces the full stream; `--quiet` prints only the final
+  status line. `--json` implies the concise form unless `-v` is given.
+- A final stderr line gives the run id, commit, status, duration, the
+  registry digest of each pushed image and where it was deployed.
+- **`--json`** (`run`, `rollback`, `list`, `history`) prints machine-readable
+  results on stdout — for `run` one object with `id`, `status`, `error`,
+  `revision`, `images` (name, repository, tags, `digest`), `deployed`,
+  `deploy_host`, `duration_seconds` — even when the run failed. When nothing
+  was recorded (config error, project busy) it's `{"status":"error",...}`.
+  Stdout carries only data; prose and progress always go to stderr.
+- **Exit status**: 0 ok, 1 failed or cancelled, 2 usage, 3 config. It is
+  j-cicd's own only if it isn't piped (`| tail` replaces it with tail's;
+  use `set -o pipefail` or `--json`).
+- **`run --plan`** works out what a run would do — the commit, steps,
+  images with tags, deploy host and refs, warnings — without running a
+  step, building, pushing, deploying or recording a run (`--json` too). It
+  checks out a release branch into a throwaway worktree to read the config
+  and compose file as committed. A run that would be refused (dirty tree,
+  no per-commit tag) lists a PROBLEM and exits 1.
+  `--plan --json` is one object: `project`, `branch`, `revision`, `steps`,
+  `images`, `deploy` (host, refs, `verify` URLs), `skipped`, `warnings`,
+  `problems`, and `upstream`/`ahead`/`behind`.
+- **Local vs. origin**: j-cicd always builds the *local* branch (the
+  release `branch:`, or the checked-out one), and says so. If it's ahead of,
+  behind, or diverged from its upstream (as of the last fetch; j-cicd never
+  touches the network for this) it warns, in the run, the plan and the
+  concise output. The plan always states
+  the relationship: in sync, ahead/behind, or no upstream to compare with.
+
+## PR merges
+
+`j-cicd merge <project> <pr>` is a merge train for one PR, using the `gh`
+CLI (must be installed and logged in) and the project's `origin` remote:
+
+1. `gh pr view` (pinned to `origin`'s repo with `-R`) must say the PR is
+   open, not a draft, not awaiting/refused review, from the same repo
+   (forks are refused) and targeting the project's `branch:` (else the
+   repo's default branch), with the fetched head matching GitHub's.
+2. The PR (`refs/pull/N/head`) and its base are fetched and merged *in the
+   object store* (`git merge-tree` + `commit-tree`), so the checkout, index
+   and branches are never touched. Conflicts fail the run.
+3. The merge commit is checked out as a snapshot (like a release branch),
+   and steps, images (tagged with the merge commit), deploy and verify run.
+4. Right before the deploy, and again before the push, `origin/<base>` and
+   the PR's head must still be where the merge was made (else nothing is
+   deployed/pushed). Only if all passed, that exact commit is pushed (a
+   compare-and-swap `--force-with-lease` on the tested base, so never a
+   blind force) to
+   the base — GitHub then shows the PR merged, and main is what was
+   deployed. `--no-merge` stops before the push; `--plan` just checks the
+   PR merges cleanly.
+
+The deploy comes before the push, so a push refused afterwards (branch
+protection, a race) leaves the release live but unmerged: the error says so
+and names `j-cicd rollback`; it never rolls back by itself. Needs push
+rights to the base branch. Recorded as a run of kind `merge` with `pr`,
+`pr_head_sha`, `merged_sha` and `pr_merged`. Code: `internal/manager/merge.go`.
 
 ## State and history
 
@@ -269,7 +419,8 @@ builds without pushing.
     so deferred cleanup still runs and the future failure-investigation
     agent is reachable after a failure.
   - `commands.go` — CLI flag parsing per subcommand (`run`, `init`,
-    `version`), and all user-facing reporting for them.
+    `version`), and all user-facing reporting for them; `jsonout.go` is
+    the `--json` encoding.
 - `cmd/j-cicd-agent/` — `package main` for the VPS agent, same
   `main.go`/`app.go`/`commands.go` split and the same "only `app.go` exits"
   rule (so the deploy lock is always released).
@@ -284,11 +435,17 @@ builds without pushing.
   - `dockercheck.go` — the pre-run Docker check, diagnosis, and
     auto-start; `dockercheck_unix.go` probes the socket and groups.
   - `deploy.go` — the deploy preconditions (per-commit tag, clean tree)
-    and the `ssh ... j-cicd-agent deploy` invocation.
+    and the agent invocation (`ssh ... j-cicd-agent deploy`, or `sh -c`
+    for a local deploy).
+  - `artifacts.go` — checking and hashing `artifacts:` after the steps,
+    and the tar stream a deploy sends them in.
   - `runner.go` — the `CommandRunner` seam plus the real `exec`-based
     implementation; `runner_unix.go` adds process-group cancellation.
 - `internal/agent/` — the VPS side: agent config (`config.go`), the
-  deploy/health-wait/rollback sequence (`agent.go`), per-project JSON state
+  deploy/health-wait/rollback sequence (`agent.go`), the `pre_swap` hook
+  (`preswap.go`), files projects — blob store, atomic install, drift
+  adoption, rollback (`files.go`) — and their systemd restart and settle
+  check (`systemd.go`), per-project JSON state
   (`state.go`), and the `flock` deploy lock (`lock_unix.go`).
 - `internal/detect/` — project inspection: Dockerfile scan, GitHub remote
   and git revision detection (`detect.go`), and the `init` scaffolding built
@@ -300,6 +457,8 @@ builds without pushing.
   start, send all output to the run log (optionally echoed), record the
   outcome. Also `Launch` (detached background run) and `Cancel`.
   Every pipeline run, CLI or dashboard, goes through `manager.Run`.
+  `plan.go` is `run --plan`; `tail.go` keeps a failed stage's last lines
+  for concise output.
   `snapshot.go` resolves a release `branch:` and manages its worktree
   checkout (plain `git` via `os/exec`, like `detect`: it's repository
   plumbing, not a pipeline command, and its tests use real repos).

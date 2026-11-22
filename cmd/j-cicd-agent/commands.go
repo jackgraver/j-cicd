@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sort"
@@ -28,7 +30,9 @@ func printUsage() {
 
 Usage:
   j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>...
-                                                       deploy, health-check, roll back on failure
+                                                       deploy images, health-check, roll back on failure
+  j-cicd-agent deploy <project> <name@sha256:...>... [--artifacts-stdin] [--revision rev]
+                                                       install files, restart, check, roll back on failure
   j-cicd-agent rollback <project>                      revert the last deploy (images only, not the database)
   j-cicd-agent status [project]                        show what is deployed and what it rolls back to
   j-cicd-agent version                                 print the version
@@ -41,7 +45,12 @@ Config: --config, else $`+configEnv+`, else `+agent.DefaultConfigFile+`.
 // subcommand that only takes --config, and returns the positionals and
 // the config path.
 func parseArgs(name, usage string, args []string) ([]string, string, error) {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	return parseArgsWith(flag.NewFlagSet(name, flag.ContinueOnError), name, usage, args)
+}
+
+// parseArgsWith is parseArgs for a subcommand with flags of its own,
+// already defined on fs.
+func parseArgsWith(fs *flag.FlagSet, name, usage string, args []string) ([]string, string, error) {
 	configPath := fs.String("config", "", "agent config (default: $"+configEnv+", else "+agent.DefaultConfigFile+")")
 	positional, err := cli.ParseInterleaved(fs, args)
 	if err != nil {
@@ -71,13 +80,30 @@ func loadConfig(path string) (*agent.Config, error) {
 	return cfg, nil
 }
 
+// maxCompose bounds a compose file sent with a deploy. It arrives inside
+// the ssh command line, which the kernel caps at 128 KiB per argument.
+const maxCompose = 64 << 10
+
 func cmdDeploy(args []string) error {
-	positional, configPath, err := parseArgs("deploy", "<project> <repo:tag|repo@sha256:...>...", args)
+	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	composeB64 := fs.String("compose-b64", "", "the release's compose file, base64-encoded (sent by j-cicd run)")
+	artifactsStdin := fs.Bool("artifacts-stdin", false, "read the files being deployed from stdin, as a tar (sent by j-cicd run)")
+	revision := fs.String("revision", "", "the revision the files were built from (for the record and check:)")
+	positional, configPath, err := parseArgsWith(fs, "deploy", "<project> <repo:tag|repo@sha256:...|name@sha256:...>...", args)
 	if err != nil {
 		return err
 	}
 	if len(positional) < 2 {
-		return usageError(errors.New("deploy needs a project and at least one repo:tag or repo@sha256:... reference"))
+		return usageError(errors.New("deploy needs a project and at least one repo:tag, repo@sha256:... or name@sha256:... reference"))
+	}
+	var compose []byte
+	if *composeB64 != "" {
+		if compose, err = base64.StdEncoding.DecodeString(*composeB64); err != nil {
+			return usageError(fmt.Errorf("--compose-b64: %w", err))
+		}
+		if len(compose) == 0 || len(compose) > maxCompose {
+			return usageError(fmt.Errorf("--compose-b64: compose file must be 1 byte to %d KiB, got %d bytes", maxCompose>>10, len(compose)))
+		}
 	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -88,7 +114,26 @@ func cmdDeploy(args []string) error {
 	defer stop()
 
 	a := agent.New(cfg, agent.Options{})
-	if err := a.Deploy(ctx, positional[0], positional[1:]); err != nil {
+	proj, err := cfg.Project(positional[0])
+	if err != nil {
+		return err
+	}
+	if proj.IsFiles() {
+		if compose != nil {
+			return usageError(errors.New("--compose-b64 goes with images; project " + proj.Name + " installs files"))
+		}
+		var in io.Reader
+		if *artifactsStdin {
+			in = os.Stdin
+		}
+		err = a.DeployFiles(ctx, proj.Name, positional[1:], *revision, in)
+	} else {
+		if *artifactsStdin || *revision != "" {
+			return usageError(errors.New("--artifacts-stdin and --revision go with files; project " + proj.Name + " runs compose services"))
+		}
+		err = a.Deploy(ctx, proj.Name, positional[1:], compose)
+	}
+	if err != nil {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 	return nil
@@ -150,15 +195,18 @@ func cmdStatus(args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PROJECT\tSERVICE\tCURRENT\tPREVIOUS\tLAST DEPLOY\tLAST RESULT")
+	fmt.Fprintln(w, "PROJECT\tSERVICE/FILE\tCURRENT\tPREVIOUS\tLAST DEPLOY\tLAST RESULT")
 	for _, p := range projects {
 		st, err := agent.LoadState(cfg.StateDir, p.Name)
 		if err != nil {
 			return err
 		}
-		names := make([]string, 0, len(p.Services))
+		names := make([]string, 0, len(p.Services)+len(p.Files))
 		for _, s := range p.Services {
 			names = append(names, s.Name)
+		}
+		for _, f := range p.Files {
+			names = append(names, f.Name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
@@ -173,8 +221,19 @@ func cmdStatus(args []string) error {
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, name, release(ss.CurrentTag, ss.Current), release(ss.PreviousTag, ss.Previous), last, orDash(ss.LastResult))
 		}
+		if c := st.Compose; c != nil {
+			fmt.Fprintf(w, "%s\t(compose file)\t%s\t%s\t%s\t\n", p.Name, composeLabel(c.Current), composeLabel(c.Previous), c.CurrentSince.Format("2006-01-02 15:04:05Z"))
+		}
 	}
 	return w.Flush()
+}
+
+// composeLabel names a release's compose file by a short content hash.
+func composeLabel(hash string) string {
+	if hash == "" {
+		return "configured"
+	}
+	return "sha256:" + hash[:min(12, len(hash))]
 }
 
 // release shows a recorded release as its tag (the commit, normally)
