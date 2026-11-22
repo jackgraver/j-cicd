@@ -7,7 +7,9 @@ import (
 	"time"
 )
 
-// Stage kinds, as recorded in a run and reported to agents.
+// Stage kinds, as recorded in a run and reported to agents. A stage with
+// nothing to name besides its kind (the docker check, the preflight, the
+// artifacts check) uses the kind as its name.
 const (
 	KindPreflight = "preflight"
 	KindDocker    = "docker-check"
@@ -26,9 +28,6 @@ const (
 	StageOK      = "ok"
 	StageFailed  = "failed"
 )
-
-// A stage with nothing to name besides its kind (the docker check, the
-// preflight, the artifacts check) uses the kind as its name.
 
 // StageResult is how one stage of the last Run went.
 type StageResult struct {
