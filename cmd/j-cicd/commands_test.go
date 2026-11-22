@@ -171,15 +171,3 @@ func TestParseRunArgsOutputFlags(t *testing.T) {
 		t.Errorf("parsed = %+v", got)
 	}
 }
-
-func TestLastLines(t *testing.T) {
-	data := []byte("a\nb\nc\n")
-	for n, want := range map[int]string{1: "c\n", 2: "b\nc\n", 3: "a\nb\nc\n", 9: "a\nb\nc\n"} {
-		if got := string(lastLines(data, n)); got != want {
-			t.Errorf("lastLines(%d) = %q, want %q", n, got, want)
-		}
-	}
-	if got := string(lastLines([]byte("a\nb"), 1)); got != "b" {
-		t.Errorf("no trailing newline: %q", got)
-	}
-}

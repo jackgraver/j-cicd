@@ -37,6 +37,11 @@ func usageError(err error) error { return &exitError{code: exitUsage, err: err} 
 // right subcommand and returns the process exit code. All of j-cicd's
 // os.Exit happens at this one boundary.
 func appStart(args []string) int {
+	// Off a terminal the output is read by a program or an agent, which
+	// gets nothing from a timestamp on every line.
+	if !isTerminal(os.Stderr) {
+		log.SetFlags(0)
+	}
 	if len(args) == 0 {
 		// Bare `j-cicd` at a terminal is "show me my projects"; from a
 		// script it's a mistake worth a usage error, not a UI.

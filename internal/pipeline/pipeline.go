@@ -56,6 +56,15 @@ type Options struct {
 	// image backend") — what a caller that hides the commands' own output
 	// still shows. Nil means none.
 	Progress io.Writer
+	// OnStage, if set, is called as each stage begins (kind is one of the
+	// Kind* constants, name the step or image or target), whether or not
+	// the stage prints a progress line. It is how a caller marks where a
+	// stage's output starts. Nil means none.
+	OnStage func(kind, name string)
+	// Detail, if set, receives the lines that explain a stage's outcome but
+	// that no command printed (the verify checks' attempts), so a caller can
+	// show them with the stage's own output. Nil means none.
+	Detail io.Writer
 }
 
 // Pipeline runs one project's pipeline.
@@ -68,6 +77,8 @@ type Pipeline struct {
 	runner      CommandRunner
 	log         *log.Logger
 	progress    io.Writer
+	onStage     func(kind, name string)
+	detail      io.Writer
 	httpClient  *http.Client
 	verifyEvery time.Duration
 	// Results a caller can read once Run returns.
@@ -75,6 +86,7 @@ type Pipeline struct {
 	artifacts []ArtifactResult
 	deployed  bool
 	verified  []VerifyResult
+	stages    []StageResult
 	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
 	// it; the real one probes the local socket.
 	inspectDocker func() dockerDiagnosis
@@ -91,6 +103,8 @@ func New(projectDir string, opts Options) *Pipeline {
 		runner:      opts.Runner,
 		log:         opts.Logger,
 		progress:    opts.Progress,
+		onStage:     opts.OnStage,
+		detail:      opts.Detail,
 		httpClient:  opts.HTTPClient,
 		verifyEvery: opts.VerifyInterval,
 
@@ -116,6 +130,12 @@ func New(projectDir string, opts Options) *Pipeline {
 // what was pushed. It stops at the first failure, and returns ctx.Err()
 // if the run is cancelled.
 func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
+	err := p.run(ctx, cfg)
+	p.closeStage(err)
+	return err
+}
+
+func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 	p.log.Printf("running pipeline for %q", cfg.Name)
 
 	deploying := cfg.Deploy != nil && p.push && p.deploy
@@ -123,9 +143,10 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 	if deploying {
 		// Checked up front: finding out after a long build and a push
 		// that the result can't be deployed is the expensive way round.
+		p.stage(KindPreflight, KindPreflight)
 		refs, err := p.deployRefs(cfg)
 		if err != nil {
-			return fmt.Errorf("cannot deploy this build: %w", err)
+			return stageErr(KindPreflight, KindPreflight, err, "cannot deploy this build: %v", err)
 		}
 		deployRefs = refs
 	}
@@ -134,8 +155,9 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		// Before the steps, not at the first docker build: a daemon that
 		// isn't reachable should fail the run in a second, with the
 		// reason as the run's error, not after a full build and test.
+		p.stage(KindDocker, KindDocker)
 		if err := p.checkDocker(ctx); err != nil {
-			return err
+			return stageErr(KindDocker, KindDocker, err, "%v", err)
 		}
 	}
 
@@ -145,28 +167,31 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		if step.Dir != "" {
 			dir = filepath.Join(p.projectDir, step.Dir)
 		}
+		p.stage(KindStep, step.Name)
 		p.say("step %s", step.Name)
 		p.log.Printf("[%s] %s", step.Name, step.Run)
 		timeout := cfg.StepTimeout(step, DefaultTimeout)
 		if err := p.exec(ctx, timeout, dir, "sh", "-c", step.Run); err != nil {
-			return fmt.Errorf("step %q failed: %w", step.Name, err)
+			return stageErr(KindStep, step.Name, err, "step %q failed: %v", step.Name, err)
 		}
 	}
 
 	timeout := cfg.ImageTimeout(DefaultTimeout)
 	for i := range cfg.Images {
 		img := &cfg.Images[i]
+		p.stage(KindBuild, img.Label())
 		p.say("building image %s", img.Label())
 		if err := p.buildImage(ctx, timeout, img); err != nil {
-			return fmt.Errorf("docker build (%s) failed: %w", img.Label(), err)
+			return stageErr(KindBuild, img.Label(), err, "docker build (%s) failed: %v", img.Label(), err)
 		}
 		if !p.push {
 			p.log.Printf("skipping push for %s (--no-push)", img.Label())
 			continue
 		}
+		p.stage(KindPush, img.Label())
 		p.say("pushing image %s", img.Label())
 		if err := p.pushImage(ctx, timeout, img); err != nil {
-			return fmt.Errorf("docker push (%s) failed: %w", img.Label(), err)
+			return stageErr(KindPush, img.Label(), err, "docker push (%s) failed: %v", img.Label(), err)
 		}
 		p.images = append(p.images, ImageResult{
 			Name:       img.Label(),
@@ -176,8 +201,11 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		})
 	}
 
+	if len(cfg.Artifacts) > 0 {
+		p.stage(KindArtifacts, KindArtifacts)
+	}
 	if err := p.collectArtifacts(cfg); err != nil {
-		return err
+		return stageErr(KindArtifacts, KindArtifacts, err, "%v", err)
 	}
 
 	switch {
@@ -188,13 +216,16 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		p.log.Printf("skipping deploy (--no-deploy)")
 	default:
 		target := cfg.Deploy.Target()
+		p.stage(KindDeploy, target)
 		p.say("deploying to %s", target)
 		if err := p.runDeploy(ctx, cfg, deployRefs); err != nil {
-			return fmt.Errorf("deploy to %s failed: %w", target, err)
+			return stageErr(KindDeploy, target, err, "deploy to %s failed: %v", target, err)
 		}
 		p.deployed = true
 		if err := p.verify(ctx, cfg); err != nil {
-			return fmt.Errorf("deployed to %s, but %w (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
+			// verify opens a stage for each check before it can fail, so the
+			// current stage is the check that failed.
+			return stageErr(KindVerify, p.currentStage(), err, "deployed to %s, but %v (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}
 
@@ -274,7 +305,7 @@ func withDeadline(ctx context.Context, timeout time.Duration, fn func(context.Co
 
 	out, err := fn(ctx)
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("timed out after %s", timeout)
+		return nil, &timeoutError{after: timeout}
 	}
 	return out, err
 }

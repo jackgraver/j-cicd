@@ -45,11 +45,15 @@ func (p *Pipeline) verify(ctx context.Context, cfg *config.Config) error {
 	for i := range cfg.Deploy.Verify {
 		v := &cfg.Deploy.Verify[i]
 		target := expandRevision(v.URL, p.revision)
+		// Each check is a stage of its own, named by the URL it asks, so a
+		// failure and its log marker say which check it was.
+		p.stage(KindVerify, target)
 		p.say("verifying %s", target)
 		started := time.Now()
-		p.log.Printf("[verify] GET %s (expect status %d%s)", target, v.ExpectStatus, expectation(v, p.revision))
+		p.note("[verify] GET %s (expect status %d%s)", target, v.ExpectStatus, expectation(v, p.revision))
 		attempts, err := p.verifyOne(ctx, v, target)
 		if err != nil {
+			p.note("[verify] %v", err)
 			return fmt.Errorf("verify %s failed: %w", target, err)
 		}
 		took := time.Since(started)
@@ -65,6 +69,15 @@ func expectation(v *config.Verify, revision string) string {
 		return ""
 	}
 	return fmt.Sprintf(", body containing %q", expandRevision(v.ExpectBodyContains, revision))
+}
+
+// note logs one line, and also gives it to the Detail writer (as a bare
+// line, without the log's timestamp) if there is one.
+func (p *Pipeline) note(format string, args ...any) {
+	p.log.Printf(format, args...)
+	if p.detail != nil {
+		fmt.Fprintf(p.detail, format+"\n", args...)
+	}
 }
 
 // verifyOne retries one check until it passes or its timeout expires.
@@ -85,7 +98,7 @@ func (p *Pipeline) verifyOne(ctx context.Context, v *config.Verify, target strin
 		if !time.Now().Add(p.verifyEvery).Before(deadline) {
 			return attempt, fmt.Errorf("still not serving this release after %d attempt(s) over %s: %s", attempt, retryFor, last)
 		}
-		p.log.Printf("[verify] attempt %d: %s; retrying", attempt, last)
+		p.note("[verify] attempt %d: %s; retrying", attempt, last)
 		select {
 		case <-ctx.Done():
 			return attempt, ctx.Err()

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"text/tabwriter"
 	"time"
 
@@ -223,11 +223,25 @@ func findRun(st *store.Store, ref string) (store.Run, error) {
 
 func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
-	follow := fs.Bool("f", false, "keep printing output until the run finishes")
+	follow := fs.Bool("f", false, "keep printing output until the run finishes (raw, unfiltered)")
 	tail := fs.Int("tail", 0, "print only the last N lines (0 for all)")
-	pos, err := parseFlagsOnly(fs, args, "<run-id|name> [-f] [--tail N]", 1, 1)
+	stage := fs.String("stage", "", "print only this stage's output, by name (test) or kind and name (\"step test\", \"build app\")")
+	grep := fs.String("grep", "", "print only lines matching this regular expression")
+	ctxLines := fs.Int("C", 0, "with --grep, lines of context around each match")
+	plain := fs.Bool("plain", false, "strip colour codes and progress-bar redraws (the default when stdout isn't a terminal)")
+	raw := fs.Bool("raw", false, "print the log exactly as recorded, overriding --plain and the non-terminal default")
+	pos, err := parseFlagsOnly(fs, args, "<run-id|name> [-f] [--tail N] [--stage s] [--grep re [-C N]] [--plain|--raw]", 1, 1)
 	if err != nil {
 		return err
+	}
+	filter := logFilter{plain: (*plain || !isTerminal(os.Stdout)) && !*raw, stage: *stage, tail: *tail, context: *ctxLines}
+	if *grep != "" {
+		if filter.grep, err = regexp.Compile(*grep); err != nil {
+			return usageError(fmt.Errorf("--grep: %w", err))
+		}
+	}
+	if *follow && (filter.stage != "" || filter.grep != nil) {
+		return usageError(errors.New("-f can't be combined with --stage or --grep"))
 	}
 	st, err := openStore()
 	if err != nil {
@@ -243,12 +257,16 @@ func cmdLogs(args []string) error {
 	}
 	defer f.Close()
 
-	if *tail > 0 && !*follow {
+	if !*follow {
 		data, err := io.ReadAll(f)
 		if err != nil {
 			return err
 		}
-		_, err = os.Stdout.Write(lastLines(data, *tail))
+		out, err := filter.apply(data)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(out)
 		return err
 	}
 
@@ -256,7 +274,7 @@ func cmdLogs(args []string) error {
 		if _, err := io.Copy(os.Stdout, f); err != nil {
 			return err
 		}
-		if !*follow || r.Status.Done() {
+		if r.Status.Done() {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -269,23 +287,8 @@ func cmdLogs(args []string) error {
 	if _, err := io.Copy(os.Stdout, f); err != nil {
 		return err
 	}
-	if *follow {
-		log.Printf("run %s %s", r.ID, r.Status)
-	}
+	log.Printf("run %s %s", r.ID, r.Status)
 	return nil
-}
-
-// lastLines returns the last n lines of data.
-func lastLines(data []byte, n int) []byte {
-	end := len(data)
-	for ; n > 0 && end > 0; n-- {
-		i := bytes.LastIndexByte(data[:end-1], '\n')
-		if i < 0 {
-			return data
-		}
-		end = i + 1
-	}
-	return data[end:]
 }
 
 func cmdCancel(args []string) error {

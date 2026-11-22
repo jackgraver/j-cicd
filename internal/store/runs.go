@@ -60,6 +60,11 @@ type Run struct {
 	// Verified are the post-deploy checks that passed.
 	Verified   []RunVerify `json:"verified,omitempty"`
 	DeployHost string      `json:"deploy_host,omitempty"`
+	// Stages are the pipeline's stages in the order they ran, each with its
+	// outcome and duration. Failure says what stopped a failed run, in
+	// fields a program can read; Error is the same thing as one sentence.
+	Stages     []RunStage  `json:"stages,omitempty"`
+	Failure    *RunFailure `json:"failure,omitempty"`
 	Status     Status      `json:"status"`
 	Error      string      `json:"error,omitempty"`
 	StartedAt  time.Time   `json:"started_at"`
@@ -68,6 +73,43 @@ type Run struct {
 	// died without finishing is told apart from one still going, and what
 	// a UI signals to cancel it.
 	PID int `json:"pid"`
+}
+
+// RunStage is one stage of a run: a step, an image build or push, the
+// deploy, a verify.
+type RunStage struct {
+	Name string `json:"name"`
+	// Kind is step, build, push, artifacts, deploy, verify, docker-check,
+	// preflight or rollback.
+	Kind string `json:"kind"`
+	// Status is ok, failed or running.
+	Status  string  `json:"status"`
+	Seconds float64 `json:"seconds"`
+	// ExitCode is the failing command's exit status, when it had one.
+	ExitCode *int `json:"exit_code,omitempty"`
+	TimedOut bool `json:"timed_out,omitempty"`
+}
+
+// Failure kinds that aren't a pipeline stage's.
+const (
+	FailureConfig    = "config"
+	FailureCancelled = "cancelled"
+	FailureRun       = "run" // anything else that stopped the run before or outside a stage
+)
+
+// RunFailure is why a run did not succeed.
+type RunFailure struct {
+	// Kind is a stage kind (see RunStage), or FailureConfig,
+	// FailureCancelled or FailureRun.
+	Kind string `json:"kind"`
+	// Stage names the failing stage, "" if the failure wasn't in one.
+	Stage    string `json:"stage,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	TimedOut bool   `json:"timed_out,omitempty"`
+	Message  string `json:"message"`
+	// Tail is the end of the failing stage's output, cleaned of colour
+	// codes and progress-bar redraws, so a reader needn't fetch the log.
+	Tail []string `json:"tail,omitempty"`
 }
 
 // RunVerify is a post-deploy check that passed: how many requests it took
@@ -157,6 +199,10 @@ func (s *Store) StartRun(r Run) (*RunHandle, error) {
 	_ = s.prune(r.Project, DefaultKeepRuns)
 	return &RunHandle{s: s, Run: r, Log: logFile}, nil
 }
+
+// Save writes the run record as it stands, so readers of the store see
+// progress (the stages so far) before the run finishes.
+func (h *RunHandle) Save() error { return writeJSON(h.s.runPath(h.Run.ID), h.Run) }
 
 // Finish records the run's outcome and closes its log. errMsg is the
 // failure reason, if any.

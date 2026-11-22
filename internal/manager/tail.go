@@ -25,7 +25,7 @@ func (t *tailWriter) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		t.lines = append(t.lines, string(bytes.TrimRight(data[:i], "\r")))
+		t.lines = append(t.lines, CleanLine(string(data[:i])))
 		data = data[i+1:]
 	}
 	t.part = append([]byte(nil), data...)
@@ -41,7 +41,7 @@ func (t *tailWriter) Lines() []string {
 	defer t.mu.Unlock()
 	out := append([]string(nil), t.lines...)
 	if len(t.part) > 0 {
-		out = append(out, string(t.part))
+		out = append(out, CleanLine(string(t.part)))
 		if len(out) > t.max {
 			out = out[len(out)-t.max:]
 		}
