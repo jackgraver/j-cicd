@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -39,6 +40,7 @@ Usage:
   j-cicd history [name]        list recorded runs, newest first
   j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
   j-cicd cancel <run-id|name>  stop a run in progress
+  j-cicd merge <name|dir> <pr> merge a GitHub PR onto its base locally, test and deploy it, then push it
   j-cicd rollback [name|dir]   revert the last deploy on the VPS (images only, not the database)
 
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
@@ -241,6 +243,70 @@ func cmdRollback(args []string) error {
 	return reportRun(run, err, "rollback failed", *asJSON)
 }
 
+// parsePRNumber reads "12" or "#12".
+func parsePRNumber(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimPrefix(s, "#"))
+	if err != nil || n <= 0 {
+		return 0, usageError(fmt.Errorf("%q is not a pull request number", s))
+	}
+	return n, nil
+}
+
+// cmdMerge is `j-cicd merge <project> <pr>`: merge the PR onto its base in
+// a throwaway checkout, run the whole pipeline on it, and push it to the
+// base only if that passed.
+func cmdMerge(args []string) error {
+	fs := flag.NewFlagSet("merge", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status (output is still recorded; see j-cicd logs)")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
+	plan := fs.Bool("plan", false, "check that the PR merges cleanly and say what would run, without running anything")
+	noDeploy := fs.Bool("no-deploy", false, "test and push images, but skip the deploy: stage (the PR is still merged afterwards)")
+	noMerge := fs.Bool("no-merge", false, "run the pipeline on the merge, but don't push it to the base branch")
+	pos, err := parseFlagsOnly(fs, args, "<name|project-dir> <pr-number> [flags]", 2, 2)
+	if err != nil {
+		return err
+	}
+	number, err := parsePRNumber(pos[1])
+	if err != nil {
+		return err
+	}
+	parsed := runArgs{projectDir: pos[0], configPath: *configPath}
+	parsed.defaultPaths()
+
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *plan {
+		p, err := manager.PlanMerge(ctx, target, number)
+		if err != nil {
+			return fmt.Errorf("merge plan: %w", err)
+		}
+		log.Printf("PR #%d %q merges cleanly into %s (%s)", p.PR, p.Title, p.Base, p.BaseSHA[:12])
+		log.Printf("  would build and test merge commit %s (PR head %s)", p.Revision, p.HeadSHA[:12])
+		log.Printf("  then push it to %s unless --no-merge", p.Base)
+		if *asJSON {
+			return printJSON(p)
+		}
+		return nil
+	}
+
+	opts := manager.Options{Deploy: !*noDeploy}
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
+	run, err := manager.MergePR(ctx, st, target, number, *noMerge, opts)
+	return reportRun(run, err, "merge failed", *asJSON)
+}
+
 // reportRun says how a recorded run ended and maps its error to an exit
 // code. The prose goes to stderr; with asJSON the result is also printed
 // to stdout as JSON, even when the run failed, so a script always has one
@@ -261,6 +327,13 @@ func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 		}
 		for _, a := range run.Artifacts {
 			log.Printf("  built %s: %s (sha256:%s)", a.Name, a.Path, a.SHA256[:min(12, len(a.SHA256))])
+		}
+		if run.Kind == store.KindMerge && run.Status == store.StatusSuccess {
+			if run.PRMerged {
+				log.Printf("  merged PR #%d: %s pushed to the base branch (git pull to update your checkout)", run.PR, run.Revision)
+			} else {
+				log.Printf("  PR #%d not merged (--no-merge)", run.PR)
+			}
 		}
 		if run.Deployed {
 			log.Printf("  deployed to %s", run.DeployHost)

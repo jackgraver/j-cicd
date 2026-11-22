@@ -38,17 +38,28 @@ const DefaultKeepRuns = 50
 // instead of running its pipeline.
 const KindRollback = "rollback"
 
+// KindMerge marks a run of a pull request merged onto its base: the merge
+// is tested and deployed, and pushed to the base if that all passed.
+const KindMerge = "merge"
+
 // Run is one recorded pipeline run.
 type Run struct {
 	ID      string `json:"id"`
 	Project string `json:"project"`
-	// Kind is "" for a pipeline run, or KindRollback.
+	// Kind is "" for a pipeline run, KindRollback or KindMerge.
 	Kind   string `json:"kind,omitempty"`
 	Dir    string `json:"dir"`
 	Config string `json:"config"`
 	// Revision is the git revision the run built ("" if not a git tree).
 	Revision string `json:"revision,omitempty"`
 	Push     bool   `json:"push"`
+	// For a KindMerge run: the pull request, its head commit when merged
+	// locally, whether the merge commit (MergedSHA, which is what was built
+	// and deployed) was then pushed to the base branch.
+	PR        int    `json:"pr,omitempty"`
+	PRHeadSHA string `json:"pr_head_sha,omitempty"`
+	PRMerged  bool   `json:"pr_merged,omitempty"`
+	MergedSHA string `json:"merged_sha,omitempty"`
 	// Images are the images this run pushed, with the registry digest
 	// each resolved to; Deployed is whether the deploy stage then handed
 	// them to DeployHost. Both are empty for a run that didn't get that far.
