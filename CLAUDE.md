@@ -237,6 +237,24 @@ Docker come from the system packages):
   — a static agent binary to copy to the VPS.
 - `gofmt -l . && go vet ./... && go test ./...` — the checks.
 
+### Releasing j-cicd with j-cicd
+
+j-cicd builds and installs itself. Use that for real releases rather than
+`go install` by hand (the commands above are for development):
+
+- `j-cicd run j-cicd` (`.cicd.yaml`) — gofmt, vet, test, build both binaries
+  stamped with the commit, and have the local `j-cicd-agent` (config
+  `~/.config/j-cicd-agent.yaml`) install them into `~/.local/bin`. Both must
+  report the new commit from `version`, or the previous binaries go back.
+- `j-cicd run j-cicd-vps-agent` (`.cicd-vps-agent.yaml`, registered with
+  `--config`) — the static linux/amd64 agent, sent to the agent on the VPS,
+  which installs it over itself. This touches the VPS: ask first.
+
+Both have `branch: main`, so commit to `main` first; the run builds main's
+latest local commit, not the working tree. `j-cicd rollback j-cicd` (or
+`j-cicd-vps-agent`) reverts the last release, `--plan` previews a run, and
+`j-cicd logs j-cicd` has the output of a failed one.
+
 `version` prints `-X main.version=...` if set via `-ldflags`, otherwise the
 git revision Go stamps into the binary (`-dirty` for uncommitted changes),
 otherwise `dev`. Go only stamps that from a regular checkout — builds from a
@@ -256,6 +274,9 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   anything path-like is a directory as before. A registered directory is
   recorded under its registered name. See **Output and agents** below for
   `--plan`, `--json`, `-v` and `--quiet`.
+- `j-cicd merge <name|project-dir> <pr> [--plan] [--no-deploy] [--no-merge]
+  [--config path] [--json] [-v|--quiet]` — run a GitHub pull request through
+  the pipeline as if merged, and merge it if it passes. See **PR merges**.
 - `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
 - `j-cicd logs <run-id|name> [-f] [--tail N]` — a run's output (a name
   means its latest run); `-f` follows it until it finishes, `--tail N`
@@ -330,6 +351,30 @@ output depends on who is reading:
   touches the network for this) it warns, in the run, the plan and the
   concise output. The plan always states
   the relationship: in sync, ahead/behind, or no upstream to compare with.
+
+## PR merges
+
+`j-cicd merge <project> <pr>` is a merge train for one PR, using the `gh`
+CLI (must be installed and logged in) and the project's `origin` remote:
+
+1. `gh pr view` must say the PR is open, from the same repo (forks are
+   refused) and targeting the project's `branch:` (else any base).
+2. The PR (`refs/pull/N/head`) and its base are fetched and merged *in the
+   object store* (`git merge-tree` + `commit-tree`), so the checkout, index
+   and branches are never touched. Conflicts fail the run.
+3. The merge commit is checked out as a snapshot (like a release branch),
+   and steps, images (tagged with the merge commit), deploy and verify run.
+4. Only if that all passed, and `origin/<base>` is still where the merge
+   was made, that exact commit is pushed (fast-forward, never forced) to
+   the base — GitHub then shows the PR merged, and main is what was
+   deployed. `--no-merge` stops before the push; `--plan` just checks the
+   PR merges cleanly.
+
+The deploy comes before the push, so a push refused afterwards (branch
+protection, a race) leaves the release live but unmerged: the error says so
+and names `j-cicd rollback`; it never rolls back by itself. Needs push
+rights to the base branch. Recorded as a run of kind `merge` with `pr`,
+`pr_head_sha`, `merged_sha` and `pr_merged`. Code: `internal/manager/merge.go`.
 
 ## State and history
 

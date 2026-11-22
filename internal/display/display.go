@@ -64,6 +64,9 @@ func Mode(r store.Run) string {
 	if r.Kind == store.KindRollback {
 		return "rollback"
 	}
+	if r.Kind == store.KindMerge {
+		return fmt.Sprintf("merge #%d", r.PR)
+	}
 	if r.Push {
 		return "push"
 	}

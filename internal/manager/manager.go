@@ -346,7 +346,11 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 		return &prepared{dir: dir, cfg: cfg, cleanup: func() {}}, nil
 	}
 
-	env.log.Printf("building the local branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
+	if rel.pr > 0 {
+		env.log.Printf("building PR #%d merged onto %s (merge commit %s) from a clean checkout; nothing in %s is included", rel.pr, rel.branch, rel.revision, dir)
+	} else {
+		env.log.Printf("building the local branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
+	}
 	snap, err := createSnapshot(ctx, snapDir, dir, rel)
 	if err != nil {
 		return nil, err
@@ -372,7 +376,7 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 		cleanup()
 		return nil, &ConfigError{Err: err}
 	}
-	if cfg.Branch != rel.branch {
+	if rel.pr == 0 && cfg.Branch != rel.branch {
 		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
 	}
 	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil

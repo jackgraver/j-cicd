@@ -22,6 +22,9 @@ type release struct {
 	// the top level), so a project in a monorepo subdirectory builds the
 	// same subdirectory of the snapshot.
 	prefix string
+	// pr is the pull request number when commit is a PR merged onto branch
+	// (a commit that exists on no branch), else 0.
+	pr int
 }
 
 // resolveRelease finds the commit the local branch points at in the
