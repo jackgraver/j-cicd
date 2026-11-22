@@ -446,3 +446,25 @@ builds without pushing.
   Bubble Tea/Lip Gloss for the dashboard).
 - No half-finished features behind TODOs — land things when they work end
   to end, even if narrow in scope.
+
+## Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+`<type>: <summary>` (optionally `<type>(<scope>): <summary>`), with the
+summary in the imperative, lowercase after the colon, no trailing period and
+about 72 characters at most. Types:
+
+- `feat:` new behaviour users or the agent can see
+- `fix:` a bug fix
+- `refactor:` restructuring with no behaviour change
+- `test:` tests only
+- `docs:` documentation only (including this file)
+- `chore:` tooling, dependencies, config, housekeeping
+- `ci:` j-cicd's own `.cicd*.yaml` pipelines
+- `perf:` performance only
+
+Mark breaking changes (config schema, CLI flags, agent protocol) with `!`
+(`feat!:`) and a `BREAKING CHANGE:` footer. The body says *why*, not what the
+diff already shows. One logical change per commit, and work happens on a
+branch (`feat/...`, `fix/...`) merged through a PR, not committed straight to
+`main`. History before this section predates the convention.
