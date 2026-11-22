@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"regexp"
 
+	"j-cicd/internal/manager"
 	"j-cicd/internal/store"
 )
 
@@ -31,4 +35,122 @@ func toJSONRuns(runs []store.Run) []jsonRun {
 // filtering the second.
 func printJSON(v any) error {
 	return json.NewEncoder(os.Stdout).Encode(v)
+}
+
+// jsonResult is what `run` and `rollback` print: the run, the exit status
+// this invocation is returning, and, for a run that didn't succeed,
+// commands that would help (next).
+type jsonResult struct {
+	jsonRun
+	ExitCode int      `json:"exit_code"`
+	Next     []string `json:"next,omitempty"`
+}
+
+func toJSONResult(r store.Run, exitCode int) jsonResult {
+	return jsonResult{jsonRun: toJSONRun(r), ExitCode: exitCode, Next: nextSteps(r)}
+}
+
+// Error kinds of jsonError.
+const (
+	errKindUsage    = "usage"
+	errKindConfig   = "config"
+	errKindNotFound = "not_found"
+	errKindBusy     = "busy"
+	errKindInternal = "internal"
+)
+
+// jsonError is what a command prints under --json when no run was
+// recorded, so there is always exactly one object to parse.
+type jsonError struct {
+	Status    string   `json:"status"` // always "error"
+	ErrorKind string   `json:"error_kind"`
+	Error     string   `json:"error"`
+	ExitCode  int      `json:"exit_code"`
+	Next      []string `json:"next,omitempty"`
+}
+
+// errNoProject is a run argument that is neither a registered project nor
+// a directory.
+var errNoProject = errors.New("no registered project or directory named")
+
+// exitCodeOf is the status appStart returns for err.
+func exitCodeOf(err error) int {
+	if err == nil {
+		return exitOK
+	}
+	var exit *exitError
+	if errors.As(err, &exit) {
+		return exit.code
+	}
+	return exitFailure
+}
+
+// toJSONError classifies err for --json.
+func toJSONError(err error, project string) jsonError {
+	e := jsonError{Status: "error", ErrorKind: errKindInternal, Error: err.Error(), ExitCode: exitCodeOf(err)}
+	var configErr *manager.ConfigError
+	switch {
+	case errors.Is(err, manager.ErrBusy):
+		e.ErrorKind = errKindBusy
+		if project != "" {
+			e.Next = []string{"j-cicd logs " + project + " -f", "j-cicd cancel " + project}
+		}
+	case errors.Is(err, errNoProject):
+		e.ErrorKind = errKindNotFound
+		e.Next = []string{"j-cicd list"}
+	case errors.As(err, &configErr) || e.ExitCode == exitConfig:
+		e.ErrorKind = errKindConfig
+	case e.ExitCode == exitUsage:
+		e.ErrorKind = errKindUsage
+	}
+	return e
+}
+
+// jsonFail prints err as a --json error object (if asJSON) and returns it,
+// for failures before a run is recorded.
+func jsonFail(err error, project string, asJSON bool) error {
+	if err != nil && asJSON {
+		_ = printJSON(toJSONError(err, project))
+	}
+	return err
+}
+
+// hasJSONFlag reports whether args ask for --json, for errors raised while
+// parsing the args themselves.
+func hasJSONFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--json" || a == "-json" || a == "--json=true" || a == "-json=true" {
+			return true
+		}
+	}
+	return false
+}
+
+// nextSteps are commands worth running after a run that didn't succeed.
+func nextSteps(r store.Run) []string {
+	if r.Status == store.StatusSuccess || r.ID == "" {
+		return nil
+	}
+	var next []string
+	if f := r.Failure; f != nil && f.Stage != "" && f.Kind != store.FailureConfig {
+		next = append(next, fmt.Sprintf("j-cicd logs %s --stage %s", r.ID, shellQuote(f.Stage)))
+	}
+	next = append(next, fmt.Sprintf("j-cicd logs %s --tail 200", r.ID))
+	if r.Deployed && r.Kind != store.KindRollback {
+		next = append(next, "j-cicd rollback "+r.Project)
+	}
+	if r.Failure != nil && r.Failure.Kind == store.FailureConfig {
+		next = append(next, "j-cicd run "+r.Project+" --plan")
+	}
+	return next
+}
+
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=,-]+$`)
+
+// shellQuote quotes s for a POSIX shell if it needs it.
+func shellQuote(s string) string {
+	if shellSafe.MatchString(s) {
+		return s
+	}
+	return "'" + regexp.MustCompile(`'`).ReplaceAllString(s, `'\''`) + "'"
 }

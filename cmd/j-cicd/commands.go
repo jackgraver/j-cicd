@@ -140,16 +140,16 @@ func cmdRun(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
-		return usageError(err)
+		return jsonFail(usageError(err), "", hasJSONFlag(args))
 	}
 
 	st, err := openStore()
 	if err != nil {
-		return err
+		return jsonFail(err, "", parsed.json)
 	}
 	target, err := resolveRunTarget(st, parsed)
 	if err != nil {
-		return err
+		return jsonFail(err, "", parsed.json)
 	}
 
 	// Ctrl-C / SIGTERM cancels the run: in-flight steps are killed rather
@@ -164,7 +164,7 @@ func cmdRun(args []string) error {
 	}
 	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, parsed.json)
 	run, err := manager.Run(ctx, st, target, opts)
-	return reportRun(run, err, "pipeline failed", parsed.json)
+	return reportRun(run, err, "pipeline failed", parsed.json, target.Name)
 }
 
 // outputMode picks what a foreground run shows on stderr. At a terminal
@@ -192,7 +192,7 @@ func cmdPlan(ctx context.Context, st *store.Store, target manager.Target, opts m
 		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
 			err = &exitError{code: exitConfig, err: err}
 		}
-		return err
+		return jsonFail(err, target.Name, asJSON)
 	}
 	if asJSON {
 		if err := printJSON(plan); err != nil {
@@ -219,18 +219,18 @@ func cmdRollback(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
-		return usageError(err)
+		return jsonFail(usageError(err), "", hasJSONFlag(args))
 	}
 	parsed := runArgs{projectDir: dir, configPath: *configPath}
 	parsed.defaultPaths()
 
 	st, err := openStore()
 	if err != nil {
-		return err
+		return jsonFail(err, "", *asJSON)
 	}
 	target, err := resolveRunTarget(st, parsed)
 	if err != nil {
-		return err
+		return jsonFail(err, "", *asJSON)
 	}
 
 	// Ctrl-C cancels it like a run; the agent then puts back what was
@@ -241,14 +241,14 @@ func cmdRollback(args []string) error {
 	opts := manager.Options{}
 	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
 	run, err := manager.Rollback(ctx, st, target, opts)
-	return reportRun(run, err, "rollback failed", *asJSON)
+	return reportRun(run, err, "rollback failed", *asJSON, target.Name)
 }
 
 // reportRun says how a recorded run ended and maps its error to an exit
 // code. The prose goes to stderr; with asJSON the result is also printed
 // to stdout as JSON, even when the run failed, so a script always has one
 // object to parse (and the exit status to go with it).
-func reportRun(run store.Run, err error, failed string, asJSON bool) error {
+func reportRun(run store.Run, err error, failed string, asJSON bool, project string) error {
 	if run.ID != "" && run.Status.Done() {
 		line := fmt.Sprintf("run %s %s after %s", run.ID, run.Status, display.Duration(run.Duration()))
 		if run.Revision != "" {
@@ -271,6 +271,19 @@ func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 		for _, v := range run.Verified {
 			log.Printf("  verified %s (%d attempt(s), %.1fs)", v.URL, v.Attempts, v.Seconds)
 		}
+		if f := run.Failure; f != nil {
+			line := "  failure: kind=" + f.Kind
+			if f.Stage != "" {
+				line += " stage=" + shellQuote(f.Stage)
+			}
+			if f.ExitCode != nil {
+				line += fmt.Sprintf(" exit=%d", *f.ExitCode)
+			}
+			if f.TimedOut {
+				line += " timed_out=true"
+			}
+			log.Print(line)
+		}
 	}
 
 	var result error
@@ -288,11 +301,11 @@ func reportRun(run store.Run, err error, failed string, asJSON bool) error {
 	if asJSON {
 		var out any
 		if run.ID != "" {
-			out = toJSONRun(run)
+			out = toJSONResult(run, exitCodeOf(result))
 		} else {
 			// Nothing was recorded (config didn't load, project busy):
 			// still one object, saying why.
-			out = map[string]string{"status": "error", "error": result.Error()}
+			out = toJSONError(result, project)
 		}
 		if jsonErr := printJSON(out); jsonErr != nil && result == nil {
 			result = jsonErr
@@ -321,7 +334,7 @@ func resolveRunTarget(st *store.Store, parsed runArgs) (manager.Target, error) {
 			return manager.Target{}, err
 		}
 		if _, statErr := os.Stat(arg); statErr != nil {
-			return manager.Target{}, &exitError{code: exitConfig, err: fmt.Errorf("no registered project or directory named %q (see j-cicd list)", arg)}
+			return manager.Target{}, &exitError{code: exitConfig, err: fmt.Errorf("%w %q (see j-cicd list)", errNoProject, arg)}
 		}
 	}
 

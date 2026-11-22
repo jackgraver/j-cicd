@@ -48,7 +48,25 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 
 ## When a run fails
 
-- `j-cicd logs <name|run-id> --tail 60` for the failing output; `history`
+`run --json` prints one object even on failure. Read it before the logs:
+
+- `failure` says what stopped the run: `kind` (step, build, push, deploy,
+  verify, docker-check, artifacts, config, cancelled), `stage` (the step or
+  image name), `exit_code`, `timed_out`, and `tail`, the last lines of that
+  stage's output with colour codes and progress redraws removed. Often that
+  is the whole diagnosis.
+- `stages` lists every stage with its status and seconds, so you can see what
+  passed. `exit_code` is j-cicd's own exit status.
+- `next` has ready-to-run commands (the failing stage's log, a rollback if
+  something is already deployed).
+- With no run recorded (unknown project, bad flag, busy project) the object is
+  `{"status":"error","error_kind":"usage|config|not_found|busy|internal",
+  "error":...,"exit_code":N}`.
+- `history --json` has the same `failure` and `stages` for earlier runs.
+
+More output, only if the tail isn't enough:
+
+- `j-cicd logs <name|run-id> --tail 60` for the end of the log; `history`
   lists recorded runs; `cancel` stops a run in progress.
 - The log is marked per stage (`== stage step test ==`). Read one stage with
   `logs <name> --stage test`, search with `--grep 'FAIL|panic' -C 3`. Off a
@@ -74,4 +92,4 @@ terminal), `version` prints the version, `guide` prints this text.
 
 0 ok; 1 pipeline failed or cancelled; 2 usage error; 3 config could not be
 loaded. With a pipe (`| tail`) `$?` is the pipe's; use `set -o pipefail` or
-`--json`.
+`--json` (its `exit_code` is the status j-cicd returned).

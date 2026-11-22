@@ -257,9 +257,14 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   recorded under its registered name. See **Output and agents** below for
   `--plan`, `--json`, `-v` and `--quiet`.
 - `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
-- `j-cicd logs <run-id|name> [-f] [--tail N]` — a run's output (a name
-  means its latest run); `-f` follows it until it finishes, `--tail N`
-  prints only the last N lines.
+- `j-cicd logs <run-id|name> [-f] [--tail N] [--stage s] [--grep re [-C N]]
+  [--plain|--raw]` — a run's output (a name means its latest run); `-f`
+  follows it until it finishes (raw), `--tail N` prints only the last N
+  lines. The log has a `== stage <text> ==` marker where each stage starts;
+  `--stage` prints one stage (`test`, `step test`, `building image app`),
+  `--grep` filters lines with `-C` context. Off a terminal (or with
+  `--plain`) colour codes and progress-bar redraws are stripped; `--raw`
+  prints the recorded bytes.
 - `j-cicd cancel <run-id|name>` — stop a run in progress.
 - `j-cicd rollback [name|project-dir] [--config path] [--json] [-v] [--quiet]` — revert
   the last deploy on the VPS via `j-cicd-agent rollback` over ssh, using
@@ -309,12 +314,31 @@ output depends on who is reading:
 - `-v`/`--verbose` forces the full stream; `--quiet` prints only the final
   status line. `--json` implies the concise form unless `-v` is given.
 - A final stderr line gives the run id, commit, status, duration, the
-  registry digest of each pushed image and where it was deployed.
+  registry digest of each pushed image and where it was deployed. A failed
+  run adds `failure: kind=step stage=test exit=3` (kind, stage, exit status,
+  `timed_out=true` — whichever apply). Off a terminal stderr carries no
+  timestamps (the run log keeps them).
+- **Failures are structured.** Every run records `stages` (name, kind,
+  status ok|failed|running, seconds, `exit_code` of a failing command,
+  `timed_out`) and, if it didn't succeed, a `failure`: `kind` (a stage kind —
+  step, build, push, artifacts, deploy, verify, docker-check, preflight,
+  rollback — or config, cancelled, run), `stage`, `exit_code`, `timed_out`,
+  `message` (the same text as `error`) and `tail`, the failing stage's last
+  40 lines cleaned of ANSI codes and progress-bar redraws. All of it is in
+  `run.json`, so it survives the process and appears in `history --json`.
+  Code: `pipeline.StageError`/`Stages()` (`internal/pipeline/stage.go`),
+  `failureOf` in `internal/manager/manager.go`, cleaning in
+  `internal/manager/ansi.go`.
 - **`--json`** (`run`, `rollback`, `list`, `history`) prints machine-readable
   results on stdout — for `run` one object with `id`, `status`, `error`,
   `revision`, `images` (name, repository, tags, `digest`), `deployed`,
-  `deploy_host`, `duration_seconds` — even when the run failed. When nothing
-  was recorded (config error, project busy) it's `{"status":"error",...}`.
+  `deploy_host`, `stages`, `failure`, `duration_seconds`, `exit_code` (the
+  status j-cicd returns) and, if it didn't succeed, `next` (runnable
+  commands: the failing stage's log, a rollback when something is already
+  deployed) — even when the run failed. When no run was recorded (unknown
+  project, bad flag, busy project, config that won't load) it is still one
+  object, `{"status":"error","error_kind":"usage|config|not_found|busy|
+  internal","error":...,"exit_code":N,"next":[...]}`; `--plan` errors too.
   Stdout carries only data; prose and progress always go to stderr.
 - **Exit status**: 0 ok, 1 failed or cancelled, 2 usage, 3 config. It is
   j-cicd's own only if it isn't piped (`| tail` replaces it with tail's;
