@@ -456,7 +456,9 @@ builds without pushing.
 `internal/guide/agent.md` is the single source of truth for how an agent
 operates j-cicd. A user-visible change to a command, flag, exit code or
 deploy behaviour updates it in the same commit; `cmd/j-cicd/guide_test.go`
-fails if a subcommand in the usage text or a key flag is missing from it.
+fails if a subcommand in the usage text or a key flag isn't named in it (in
+backticks). That checks names only, so a passing test doesn't mean the
+guide's behaviour descriptions are current — review those by hand.
 
 ## Commit messages
 

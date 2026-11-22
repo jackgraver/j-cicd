@@ -8,11 +8,15 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 ## Rules
 
 - Deploy through j-cicd only. Never build images by hand or ssh to the VPS to
-  deploy.
+  deploy (image projects), or copy binaries into place by hand (files
+  projects).
 - Ask the user before a production deploy (`run` that pushes and deploys)
   unless they already told you to deploy.
-- A run builds the committed release branch (or the working tree if the
-  project sets no `branch:`). Commit first; a dirty tree can't be deployed.
+- What a run builds depends on the project's `branch:`. With `branch:` set it
+  builds that branch's latest *commit* in a clean checkout: uncommitted
+  changes are left out (and don't block), so commit what should ship. Without
+  `branch:` it builds the working tree, and a dirty tree is refused for a
+  deploy (`--deploy-dirty` overrides). `--plan` states which applies.
 
 ## Deploy workflow
 
@@ -23,8 +27,23 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
    one line per stage and the failing stage's last lines. `-v` streams
    everything, `--quiet` prints only the final status, `--json` prints one
    result object on stdout.
-3. `--no-push` builds only; `--no-deploy` pushes images without deploying.
-   `--deploy-dirty` overrides the dirty-tree refusal; don't use it unasked.
+3. `--no-push` builds only; `--no-deploy` pushes images (image projects)
+   without deploying. `--deploy-dirty` overrides the dirty-tree refusal;
+   don't use it unasked.
+4. Only one run per project at a time: starting another while one is going
+   fails on the per-project lock. `j-cicd logs <name> -f` follows a live run;
+   `cancel` stops it.
+
+## Project kinds
+
+- **Image projects** (`images:`): built and pushed to a registry, then the
+  VPS agent pulls them over ssh (`deploy.host`).
+- **Files projects** (`artifacts:`): binaries listed in `.cicd.yaml` are
+  hashed and sent to the agent, installed atomically, their systemd unit
+  restarted and checked. `deploy.local: true` does this on this machine, with
+  no ssh (j-cicd installs itself that way). `--no-deploy` still builds and
+  hashes, but nothing is installed.
+`--plan` shows which kind and where it deploys.
 
 ## When a run fails
 
@@ -32,7 +51,8 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
   lists recorded runs; `cancel` stops a run in progress.
 - A failure at the verify stage means the release IS running but the public
   site isn't serving it (yet). Investigate before rolling back.
-- Failed deploys roll back by themselves on the VPS; verify failures never do.
+- The agent rolls a failed deploy back by itself (on the VPS, or locally for
+  `deploy.local`); verify failures never trigger a rollback.
 
 ## Rollback
 
