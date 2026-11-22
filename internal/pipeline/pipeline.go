@@ -56,20 +56,24 @@ type Options struct {
 	// image backend") — what a caller that hides the commands' own output
 	// still shows. Nil means none.
 	Progress io.Writer
+	// BeforeDeploy, if set, runs right before the deploy stage; an error
+	// from it fails the run with nothing deployed. Nil means no check.
+	BeforeDeploy func(context.Context) error
 }
 
 // Pipeline runs one project's pipeline.
 type Pipeline struct {
-	projectDir  string
-	push        bool
-	deploy      bool
-	revision    string
-	deployDirty bool
-	runner      CommandRunner
-	log         *log.Logger
-	progress    io.Writer
-	httpClient  *http.Client
-	verifyEvery time.Duration
+	projectDir   string
+	push         bool
+	deploy       bool
+	revision     string
+	deployDirty  bool
+	runner       CommandRunner
+	log          *log.Logger
+	progress     io.Writer
+	beforeDeploy func(context.Context) error
+	httpClient   *http.Client
+	verifyEvery  time.Duration
 	// Results a caller can read once Run returns.
 	images    []ImageResult
 	artifacts []ArtifactResult
@@ -83,16 +87,17 @@ type Pipeline struct {
 // New returns a Pipeline that runs commands against projectDir.
 func New(projectDir string, opts Options) *Pipeline {
 	p := &Pipeline{
-		projectDir:  projectDir,
-		push:        opts.Push,
-		deploy:      opts.Deploy,
-		revision:    opts.Revision,
-		deployDirty: opts.DeployDirty,
-		runner:      opts.Runner,
-		log:         opts.Logger,
-		progress:    opts.Progress,
-		httpClient:  opts.HTTPClient,
-		verifyEvery: opts.VerifyInterval,
+		projectDir:   projectDir,
+		push:         opts.Push,
+		deploy:       opts.Deploy,
+		revision:     opts.Revision,
+		deployDirty:  opts.DeployDirty,
+		runner:       opts.Runner,
+		log:          opts.Logger,
+		progress:     opts.Progress,
+		beforeDeploy: opts.BeforeDeploy,
+		httpClient:   opts.HTTPClient,
+		verifyEvery:  opts.VerifyInterval,
 
 		inspectDocker: inspectDockerHost,
 	}
@@ -188,6 +193,11 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		p.log.Printf("skipping deploy (--no-deploy)")
 	default:
 		target := cfg.Deploy.Target()
+		if p.beforeDeploy != nil {
+			if err := p.beforeDeploy(ctx); err != nil {
+				return fmt.Errorf("not deploying: %w", err)
+			}
+		}
 		p.say("deploying to %s", target)
 		if err := p.runDeploy(ctx, cfg, deployRefs); err != nil {
 			return fmt.Errorf("deploy to %s failed: %w", target, err)

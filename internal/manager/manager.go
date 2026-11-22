@@ -52,6 +52,8 @@ type Options struct {
 	// Runner overrides how commands execute; nil means real processes.
 	// Tests substitute a fake here.
 	Runner pipeline.CommandRunner
+	// beforeDeploy is pipeline.Options.BeforeDeploy; MergePR sets it.
+	beforeDeploy func(context.Context) error
 }
 
 // ErrBusy means the project already has a run in progress. Two pipelines
@@ -402,6 +404,8 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
 		Logger:      env.log,
 		Progress:    env.stages,
+
+		BeforeDeploy: opts.beforeDeploy,
 	})
 	err := p.Run(ctx, cfg)
 	for _, img := range p.Images() {
