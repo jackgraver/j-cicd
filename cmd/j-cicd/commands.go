@@ -39,7 +39,7 @@ Usage:
 
   j-cicd run [name|dir]        run a pipeline (steps, docker build+push, then deploy)
   j-cicd history [name]        list recorded runs, newest first
-  j-cicd logs <run-id|name>    print a run's output (a name means its latest run)
+  j-cicd logs <run-id|name>    print a run's output (a name means its latest run; --stage, --grep, --tail, --plain)
   j-cicd cancel <run-id|name>  stop a run in progress
   j-cicd rollback [name|dir]   revert the last deploy on the VPS (images only, not the database)
 

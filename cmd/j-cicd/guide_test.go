@@ -14,6 +14,7 @@ var guideMustMention = []string{
 	"run", "rollback", "add", "remove", "list", "history", "logs", "cancel",
 	"init", "ui", "version", "guide",
 	"--plan", "--json", "--no-push", "--no-deploy", "--deploy-dirty", "-v", "--quiet", "--tail",
+	"--stage", "--grep", "--raw",
 }
 
 // mentioned reports whether the guide names w as a command or flag: as a

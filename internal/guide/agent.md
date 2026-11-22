@@ -50,6 +50,10 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 
 - `j-cicd logs <name|run-id> --tail 60` for the failing output; `history`
   lists recorded runs; `cancel` stops a run in progress.
+- The log is marked per stage (`== stage step test ==`). Read one stage with
+  `logs <name> --stage test`, search with `--grep 'FAIL|panic' -C 3`. Off a
+  terminal, colour codes and progress-bar redraws are stripped (`--raw` keeps
+  them). `--stage` and `--grep` can't be combined with `-f`.
 - A failure at the verify stage means the release IS running but the public
   site isn't serving it (yet). Investigate before rolling back.
 - The agent rolls a failed deploy back by itself (on the VPS, or locally for

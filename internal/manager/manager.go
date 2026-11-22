@@ -298,14 +298,14 @@ type stageWriter struct {
 	marker io.Writer // the run log, or nil
 }
 
-// stageMarker is how a stage's start is written in the run log: a line of
-// its own, "== stage <what the stage line said> ==".
-const stageMarker = "== stage "
+// StageMarker starts the line that marks a stage's start in the run log:
+// "== stage <what the stage line said> ==", e.g. "== stage step test ==".
+const StageMarker = "== stage "
 
 func (s *stageWriter) Write(p []byte) (int, error) {
 	s.tail.reset()
 	if text := strings.TrimSpace(strings.TrimPrefix(string(p), "• ")); s.marker != nil && text != "" && !strings.HasPrefix(text, "verified ") {
-		fmt.Fprintf(s.marker, "%s%s ==\n", stageMarker, text)
+		fmt.Fprintf(s.marker, "%s%s ==\n", StageMarker, text)
 	}
 	if s.w == nil {
 		return len(p), nil

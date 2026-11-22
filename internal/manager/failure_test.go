@@ -102,8 +102,8 @@ func TestCleanLine(t *testing.T) {
 		"bar\r\x1b[2K":                         "bar",
 		"\x1b]8;;http://x\x07link\x1b]8;;\x07": "link",
 	} {
-		if got := cleanLine(in); got != want {
-			t.Errorf("cleanLine(%q) = %q, want %q", in, got, want)
+		if got := CleanLine(in); got != want {
+			t.Errorf("CleanLine(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
