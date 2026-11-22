@@ -24,8 +24,10 @@ import (
 // otherwise cli.Version falls back to the git revision Go recorded.
 var version string
 
-func printUsage() {
-	fmt.Fprint(os.Stderr, `j-cicd - build, test and ship your projects from one place
+func printUsage() { fmt.Fprint(os.Stderr, usageText()) }
+
+func usageText() string {
+	return `j-cicd - build, test and ship your projects from one place
 
 Usage:
   j-cicd                       open the dashboard (when run in a terminal)
@@ -42,6 +44,7 @@ Usage:
   j-cicd rollback [name|dir]   revert the last deploy on the VPS (images only, not the database)
 
   j-cicd init [project-dir]    scaffold a starter .cicd.yaml in project-dir
+  j-cicd guide                 print the operating guide for AI agents (matches this version)
   j-cicd version               print the j-cicd version
 
 Output: at a terminal, run streams everything. Anywhere else (a pipe, a
@@ -56,10 +59,10 @@ Exit status: 0 success; 1 the pipeline (or rollback) failed or was cancelled;
 2 usage error; 3 config could not be loaded. Check it directly: in a pipeline
 like "j-cicd run x | tail", $? is tail's, not j-cicd's (use set -o pipefail).
 
-Every run is recorded under the state dir (`+"$"+store.HomeEnv+`, else
+Every run is recorded under the state dir (` + "$" + store.HomeEnv + `, else
 $XDG_STATE_HOME/j-cicd, else ~/.local/state/j-cicd).
 Run "j-cicd <command> -h" for flags on a given command.
-`)
+`
 }
 
 // parseCommandFlags parses args for a subcommand that takes an optional

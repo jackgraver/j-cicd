@@ -266,6 +266,10 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   the config's `deploy:` section. Recorded as a run of kind `rollback`.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
   `.cicd.yaml`.
+- `j-cicd guide` — print the operating guide for AI agents using j-cicd
+  (`internal/guide/agent.md`, embedded in the binary so it always matches the
+  installed version). Project CLAUDE.md files should point agents here rather
+  than restate how j-cicd works.
 - `j-cicd version`
 - `j-cicd-agent deploy <project> <repo:tag|repo@sha256:...>... [--config path]` — on
   the VPS: deploy, health-check, roll back on failure. Normally run by
@@ -446,6 +450,15 @@ builds without pushing.
   Bubble Tea/Lip Gloss for the dashboard).
 - No half-finished features behind TODOs — land things when they work end
   to end, even if narrow in scope.
+
+## Keeping the agent guide current
+
+`internal/guide/agent.md` is the single source of truth for how an agent
+operates j-cicd. A user-visible change to a command, flag, exit code or
+deploy behaviour updates it in the same commit; `cmd/j-cicd/guide_test.go`
+fails if a subcommand in the usage text or a key flag isn't named in it (in
+backticks). That checks names only, so a passing test doesn't mean the
+guide's behaviour descriptions are current — review those by hand.
 
 ## Commit messages
 

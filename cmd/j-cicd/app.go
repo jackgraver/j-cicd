@@ -70,6 +70,8 @@ func appStart(args []string) int {
 		err = cmdCancel(args[1:])
 	case "init":
 		err = cmdInit(args[1:])
+	case "guide":
+		err = cmdGuide(args[1:])
 	case "version":
 		fmt.Println("j-cicd", cli.Version(version))
 	case "help", "-h", "--help":
