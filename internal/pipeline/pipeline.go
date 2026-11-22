@@ -75,6 +75,7 @@ type Pipeline struct {
 	artifacts []ArtifactResult
 	deployed  bool
 	verified  []VerifyResult
+	stages    []StageResult
 	// inspectDocker diagnoses an unreachable Docker daemon. Tests replace
 	// it; the real one probes the local socket.
 	inspectDocker func() dockerDiagnosis
@@ -116,6 +117,12 @@ func New(projectDir string, opts Options) *Pipeline {
 // what was pushed. It stops at the first failure, and returns ctx.Err()
 // if the run is cancelled.
 func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
+	err := p.run(ctx, cfg)
+	p.closeStage(err)
+	return err
+}
+
+func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 	p.log.Printf("running pipeline for %q", cfg.Name)
 
 	deploying := cfg.Deploy != nil && p.push && p.deploy
@@ -123,9 +130,10 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 	if deploying {
 		// Checked up front: finding out after a long build and a push
 		// that the result can't be deployed is the expensive way round.
+		p.stage(KindPreflight, "deploy-check")
 		refs, err := p.deployRefs(cfg)
 		if err != nil {
-			return fmt.Errorf("cannot deploy this build: %w", err)
+			return stageErr(KindPreflight, "deploy-check", err, "cannot deploy this build: %v", err)
 		}
 		deployRefs = refs
 	}
@@ -134,8 +142,9 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		// Before the steps, not at the first docker build: a daemon that
 		// isn't reachable should fail the run in a second, with the
 		// reason as the run's error, not after a full build and test.
+		p.stage(KindDocker, "docker")
 		if err := p.checkDocker(ctx); err != nil {
-			return err
+			return stageErr(KindDocker, "docker", err, "%v", err)
 		}
 	}
 
@@ -145,28 +154,31 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		if step.Dir != "" {
 			dir = filepath.Join(p.projectDir, step.Dir)
 		}
+		p.stage(KindStep, step.Name)
 		p.say("step %s", step.Name)
 		p.log.Printf("[%s] %s", step.Name, step.Run)
 		timeout := cfg.StepTimeout(step, DefaultTimeout)
 		if err := p.exec(ctx, timeout, dir, "sh", "-c", step.Run); err != nil {
-			return fmt.Errorf("step %q failed: %w", step.Name, err)
+			return stageErr(KindStep, step.Name, err, "step %q failed: %v", step.Name, err)
 		}
 	}
 
 	timeout := cfg.ImageTimeout(DefaultTimeout)
 	for i := range cfg.Images {
 		img := &cfg.Images[i]
+		p.stage(KindBuild, img.Label())
 		p.say("building image %s", img.Label())
 		if err := p.buildImage(ctx, timeout, img); err != nil {
-			return fmt.Errorf("docker build (%s) failed: %w", img.Label(), err)
+			return stageErr(KindBuild, img.Label(), err, "docker build (%s) failed: %v", img.Label(), err)
 		}
 		if !p.push {
 			p.log.Printf("skipping push for %s (--no-push)", img.Label())
 			continue
 		}
+		p.stage(KindPush, img.Label())
 		p.say("pushing image %s", img.Label())
 		if err := p.pushImage(ctx, timeout, img); err != nil {
-			return fmt.Errorf("docker push (%s) failed: %w", img.Label(), err)
+			return stageErr(KindPush, img.Label(), err, "docker push (%s) failed: %v", img.Label(), err)
 		}
 		p.images = append(p.images, ImageResult{
 			Name:       img.Label(),
@@ -176,8 +188,11 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		})
 	}
 
+	if len(cfg.Artifacts) > 0 {
+		p.stage(KindArtifacts, "artifacts")
+	}
 	if err := p.collectArtifacts(cfg); err != nil {
-		return err
+		return stageErr(KindArtifacts, "artifacts", err, "%v", err)
 	}
 
 	switch {
@@ -188,13 +203,17 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 		p.log.Printf("skipping deploy (--no-deploy)")
 	default:
 		target := cfg.Deploy.Target()
+		p.stage(KindDeploy, target)
 		p.say("deploying to %s", target)
 		if err := p.runDeploy(ctx, cfg, deployRefs); err != nil {
-			return fmt.Errorf("deploy to %s failed: %w", target, err)
+			return stageErr(KindDeploy, target, err, "deploy to %s failed: %v", target, err)
 		}
 		p.deployed = true
+		if len(cfg.Deploy.Verify) > 0 {
+			p.stage(KindVerify, target)
+		}
 		if err := p.verify(ctx, cfg); err != nil {
-			return fmt.Errorf("deployed to %s, but %w (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
+			return stageErr(KindVerify, target, err, "deployed to %s, but %v (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}
 
@@ -274,7 +293,7 @@ func withDeadline(ctx context.Context, timeout time.Duration, fn func(context.Co
 
 	out, err := fn(ctx)
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("timed out after %s", timeout)
+		return nil, &timeoutError{after: timeout}
 	}
 	return out, err
 }

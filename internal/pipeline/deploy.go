@@ -120,15 +120,22 @@ const maxComposeFile = 64 << 10
 // means (it alone knows what was deployed) and health-checks the result;
 // its exit status is the rollback's.
 func (p *Pipeline) Rollback(ctx context.Context, cfg *config.Config) error {
+	err := p.rollback(ctx, cfg)
+	p.closeStage(err)
+	return err
+}
+
+func (p *Pipeline) rollback(ctx context.Context, cfg *config.Config) error {
 	if cfg.Deploy == nil {
 		return fmt.Errorf("%q has no deploy: section, so there is nothing to roll back", cfg.Name)
 	}
 	target := cfg.Deploy.Target()
 	name, args := agentCommand(cfg.Deploy, "rollback")
+	p.stage(KindRollback, target)
 	p.say("rolling back on %s", target)
 	p.log.Printf("[rollback] %s %s", name, strings.Join(args, " "))
 	if err := p.exec(ctx, cfg.DeployTimeout(DefaultTimeout), "", name, args...); err != nil {
-		return fmt.Errorf("rollback on %s failed: %w", target, err)
+		return stageErr(KindRollback, target, err, "rollback on %s failed: %v", target, err)
 	}
 	return nil
 }

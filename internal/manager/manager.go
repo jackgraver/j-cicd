@@ -164,7 +164,9 @@ func Rollback(ctx context.Context, st *store.Store, t Target, opts Options) (sto
 			return &ConfigError{Err: err}
 		}
 		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages})
-		if err := p.Rollback(ctx, cfg); err != nil {
+		err = p.Rollback(ctx, cfg)
+		recordStages(env.run, p.Stages())
+		if err != nil {
 			if ctx.Err() != nil {
 				return fmt.Errorf("cancelled: %w", err)
 			}
@@ -240,25 +242,24 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 		return store.Run{}, err
 	}
 
+	// The tail is kept in every mode: it is recorded with a failed run, so
+	// whoever reads the result later needn't fetch the log.
+	tail := newTail(tailLines)
 	logOut := io.Writer(h.Log)
 	var progress io.Writer
-	var tail *tailWriter
-	cmdOut := io.Writer(h.Log)
+	cmdOut := io.MultiWriter(h.Log, tail)
 	if opts.Echo != nil {
 		logOut = io.MultiWriter(h.Log, opts.Echo)
-		cmdOut = logOut
+		cmdOut = io.MultiWriter(logOut, tail)
 	} else if opts.Progress != nil {
-		progress, tail = opts.Progress, newTail(tailLines)
-		cmdOut = io.MultiWriter(h.Log, tail)
+		progress = opts.Progress
 		fmt.Fprintf(progress, "run %s started\n", h.Run.ID)
 	}
 	logger := log.New(logOut, "", log.LstdFlags)
 	logger.Printf("run %s %s", h.Run.ID, what)
 
 	env := &runEnv{out: cmdOut, log: logger, progress: progress, run: &h.Run}
-	if progress != nil {
-		env.stages = &stageWriter{w: progress, tail: tail}
-	}
+	env.stages = &stageWriter{w: progress, tail: tail, marker: h.Log}
 	runErr := fn(env)
 
 	status := store.StatusSuccess
@@ -276,6 +277,7 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 		if lines := tailLinesOf(tail); progress != nil && len(lines) > 0 {
 			fmt.Fprintf(progress, "--- last %d lines of output (full log: j-cicd logs %s) ---\n%s\n---\n", len(lines), h.Run.ID, strings.Join(lines, "\n"))
 		}
+		h.Run.Failure = failureOf(ctx, runErr, tailLinesOf(tail))
 	} else {
 		logger.Printf("run succeeded")
 	}
@@ -286,15 +288,63 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	return h.Run, runErr
 }
 
-// stageWriter forwards stage lines and forgets the output before them.
+// stageWriter receives the pipeline's stage lines ("• step test"). Each
+// one starts a new command, so it discards the output kept so far; it is
+// forwarded to the concise stream if there is one; and it is written to
+// the run log as a marker line, so the log can be read stage by stage.
 type stageWriter struct {
-	w    io.Writer
-	tail *tailWriter
+	w      io.Writer // the concise stream, or nil
+	tail   *tailWriter
+	marker io.Writer // the run log, or nil
 }
+
+// stageMarker is how a stage's start is written in the run log: a line of
+// its own, "== stage <what the stage line said> ==".
+const stageMarker = "== stage "
 
 func (s *stageWriter) Write(p []byte) (int, error) {
 	s.tail.reset()
+	if text := strings.TrimSpace(strings.TrimPrefix(string(p), "• ")); s.marker != nil && text != "" && !strings.HasPrefix(text, "verified ") {
+		fmt.Fprintf(s.marker, "%s%s ==\n", stageMarker, text)
+	}
+	if s.w == nil {
+		return len(p), nil
+	}
 	return s.w.Write(p)
+}
+
+// failureOf describes why a run failed, from the error that stopped it
+// and the end of the failing stage's output.
+func failureOf(ctx context.Context, err error, tail []string) *store.RunFailure {
+	f := &store.RunFailure{Kind: store.FailureRun, Message: err.Error(), Tail: tail}
+	var se *pipeline.StageError
+	if errors.As(err, &se) {
+		f.Kind, f.Stage, f.TimedOut = se.Kind, se.Stage, se.TimedOut
+		if se.ExitCode >= 0 {
+			code := se.ExitCode
+			f.ExitCode = &code
+		}
+	}
+	var ce *ConfigError
+	switch {
+	case ctx.Err() != nil:
+		f.Kind = store.FailureCancelled
+	case errors.As(err, &ce):
+		f.Kind = store.FailureConfig
+	}
+	return f
+}
+
+// recordStages copies the pipeline's stage results into the run.
+func recordStages(run *store.Run, stages []pipeline.StageResult) {
+	for _, s := range stages {
+		rs := store.RunStage{Name: s.Name, Kind: s.Kind, Status: s.Status, Seconds: s.Duration.Round(100 * time.Millisecond).Seconds(), TimedOut: s.TimedOut}
+		if s.ExitCode >= 0 {
+			code := s.ExitCode
+			rs.ExitCode = &code
+		}
+		run.Stages = append(run.Stages, rs)
+	}
 }
 
 func tailLinesOf(t *tailWriter) []string {
@@ -400,6 +450,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Progress:    env.stages,
 	})
 	err := p.Run(ctx, cfg)
+	recordStages(env.run, p.Stages())
 	for _, img := range p.Images() {
 		env.run.Images = append(env.run.Images, store.RunImage{Name: img.Name, Repository: img.Repository, Tags: img.Tags, Digest: img.Digest})
 	}
