@@ -163,7 +163,7 @@ func Rollback(ctx context.Context, st *store.Store, t Target, opts Options) (sto
 		if err != nil {
 			return &ConfigError{Err: err}
 		}
-		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages})
+		p := pipeline.New(dir, pipeline.Options{Runner: runnerFor(opts, env.out), Logger: env.log, Progress: env.stages, OnStage: env.onStage})
 		err = p.Rollback(ctx, cfg)
 		recordStages(env.run, p.Stages())
 		if err != nil {
@@ -210,11 +210,14 @@ type runEnv struct {
 	log *log.Logger
 	// progress is the concise stream, or nil (see Options.Progress).
 	progress io.Writer
-	// stages is progress for the pipeline's stage lines: each one starts a
-	// new command, so it also discards the output kept so far, and a
-	// failure's tail is that stage's output alone. nil without progress.
+	// stages is where the pipeline writes its stage lines: the concise
+	// stream, or nil.
 	stages io.Writer
-	run    *store.Run
+	// onStage is called as each pipeline stage begins. It writes the stage's
+	// marker to the run log and discards the output kept so far, so a
+	// failure's tail is that stage's output alone.
+	onStage func(kind, name string)
+	run     *store.Run
 	// warnings collects every warnf, for callers that report them
 	// themselves (Plan).
 	warnings []string
@@ -258,8 +261,15 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	logger := log.New(logOut, "", log.LstdFlags)
 	logger.Printf("run %s %s", h.Run.ID, what)
 
-	env := &runEnv{out: cmdOut, log: logger, progress: progress, run: &h.Run}
-	env.stages = &stageWriter{w: progress, tail: tail, marker: h.Log}
+	// Stage markers go to the run log in every mode (concise, quiet and Echo
+	// alike), because `logs --stage` and a failure's tail rely on them. A
+	// stage that prints no progress line still gets one and still starts a
+	// fresh tail, so the tail never shows an earlier stage's output.
+	env := &runEnv{out: cmdOut, log: logger, progress: progress, run: &h.Run, stages: progress}
+	env.onStage = func(kind, name string) {
+		tail.reset()
+		fmt.Fprintf(h.Log, "%s%s %s ==\n", StageMarker, kind, name)
+	}
 	runErr := fn(env)
 
 	status := store.StatusSuccess
@@ -288,30 +298,10 @@ func record(ctx context.Context, st *store.Store, r store.Run, opts Options, wha
 	return h.Run, runErr
 }
 
-// stageWriter receives the pipeline's stage lines ("• step test"). Each
-// one starts a new command, so it discards the output kept so far; it is
-// forwarded to the concise stream if there is one; and it is written to
-// the run log as a marker line, so the log can be read stage by stage.
-type stageWriter struct {
-	w      io.Writer // the concise stream, or nil
-	tail   *tailWriter
-	marker io.Writer // the run log, or nil
-}
-
 // StageMarker starts the line that marks a stage's start in the run log:
-// "== stage <what the stage line said> ==", e.g. "== stage step test ==".
+// "== stage <kind> <name> ==", e.g. "== stage step test ==" or
+// "== stage build app ==".
 const StageMarker = "== stage "
-
-func (s *stageWriter) Write(p []byte) (int, error) {
-	s.tail.reset()
-	if text := strings.TrimSpace(strings.TrimPrefix(string(p), "• ")); s.marker != nil && text != "" && !strings.HasPrefix(text, "verified ") {
-		fmt.Fprintf(s.marker, "%s%s ==\n", StageMarker, text)
-	}
-	if s.w == nil {
-		return len(p), nil
-	}
-	return s.w.Write(p)
-}
 
 // failureOf describes why a run failed, from the error that stopped it
 // and the end of the failing stage's output.
@@ -448,6 +438,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
 		Logger:      env.log,
 		Progress:    env.stages,
+		OnStage:     env.onStage,
 	})
 	err := p.Run(ctx, cfg)
 	recordStages(env.run, p.Stages())

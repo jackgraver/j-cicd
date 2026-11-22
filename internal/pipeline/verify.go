@@ -45,6 +45,9 @@ func (p *Pipeline) verify(ctx context.Context, cfg *config.Config) error {
 	for i := range cfg.Deploy.Verify {
 		v := &cfg.Deploy.Verify[i]
 		target := expandRevision(v.URL, p.revision)
+		// Each check is a stage of its own, named by the URL it asks, so a
+		// failure and its log marker say which check it was.
+		p.stage(KindVerify, target)
 		p.say("verifying %s", target)
 		started := time.Now()
 		p.log.Printf("[verify] GET %s (expect status %d%s)", target, v.ExpectStatus, expectation(v, p.revision))

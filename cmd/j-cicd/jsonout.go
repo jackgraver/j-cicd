@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"j-cicd/internal/manager"
 	"j-cicd/internal/store"
@@ -119,8 +121,23 @@ func jsonFail(err error, project string, asJSON bool) error {
 // parsing the args themselves.
 func hasJSONFlag(args []string) bool {
 	for _, a := range args {
-		if a == "--json" || a == "-json" || a == "--json=true" || a == "-json=true" {
+		flagName, ok := strings.CutPrefix(a, "--")
+		if !ok {
+			flagName, ok = strings.CutPrefix(a, "-")
+		}
+		if !ok {
+			continue
+		}
+		name, value, hasValue := strings.Cut(flagName, "=")
+		if name != "json" {
+			continue
+		}
+		if !hasValue {
 			return true
+		}
+		// The flag package accepts any strconv.ParseBool spelling.
+		if b, err := strconv.ParseBool(value); err == nil {
+			return b
 		}
 	}
 	return false
@@ -152,5 +169,5 @@ func shellQuote(s string) string {
 	if shellSafe.MatchString(s) {
 		return s
 	}
-	return "'" + regexp.MustCompile(`'`).ReplaceAllString(s, `'\''`) + "'"
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

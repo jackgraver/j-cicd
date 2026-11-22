@@ -261,7 +261,8 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   [--plain|--raw]` — a run's output (a name means its latest run); `-f`
   follows it until it finishes (raw), `--tail N` prints only the last N
   lines. The log has a `== stage <text> ==` marker where each stage starts;
-  `--stage` prints one stage (`test`, `step test`, `building image app`),
+  `--stage` prints one stage by name or by kind and name (`test`,
+  `step test`, `build app`, `verify https://…`; a name must match exactly),
   `--grep` filters lines with `-C` context. Off a terminal (or with
   `--plain`) colour codes and progress-bar redraws are stripped; `--raw`
   prints the recorded bytes.

@@ -56,6 +56,11 @@ type Options struct {
 	// image backend") — what a caller that hides the commands' own output
 	// still shows. Nil means none.
 	Progress io.Writer
+	// OnStage, if set, is called as each stage begins (kind is one of the
+	// Kind* constants, name the step or image or target), whether or not
+	// the stage prints a progress line. It is how a caller marks where a
+	// stage's output starts. Nil means none.
+	OnStage func(kind, name string)
 }
 
 // Pipeline runs one project's pipeline.
@@ -68,6 +73,7 @@ type Pipeline struct {
 	runner      CommandRunner
 	log         *log.Logger
 	progress    io.Writer
+	onStage     func(kind, name string)
 	httpClient  *http.Client
 	verifyEvery time.Duration
 	// Results a caller can read once Run returns.
@@ -92,6 +98,7 @@ func New(projectDir string, opts Options) *Pipeline {
 		runner:      opts.Runner,
 		log:         opts.Logger,
 		progress:    opts.Progress,
+		onStage:     opts.OnStage,
 		httpClient:  opts.HTTPClient,
 		verifyEvery: opts.VerifyInterval,
 
@@ -209,11 +216,8 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 			return stageErr(KindDeploy, target, err, "deploy to %s failed: %v", target, err)
 		}
 		p.deployed = true
-		if len(cfg.Deploy.Verify) > 0 {
-			p.stage(KindVerify, target)
-		}
 		if err := p.verify(ctx, cfg); err != nil {
-			return stageErr(KindVerify, target, err, "deployed to %s, but %v (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
+			return stageErr(KindVerify, p.currentStage(), err, "deployed to %s, but %v (the new release is running; revert it with: j-cicd rollback %s)", target, err, cfg.Name)
 		}
 	}
 

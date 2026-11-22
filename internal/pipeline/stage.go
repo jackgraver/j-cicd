@@ -79,6 +79,17 @@ func (p *Pipeline) Stages() []StageResult { return p.stages }
 func (p *Pipeline) stage(kind, name string) {
 	p.closeStage(nil)
 	p.stages = append(p.stages, StageResult{Name: name, Kind: kind, Status: StageRunning, Started: time.Now(), ExitCode: -1})
+	if p.onStage != nil {
+		p.onStage(kind, name)
+	}
+}
+
+// currentStage is the name of the stage most recently begun.
+func (p *Pipeline) currentStage() string {
+	if len(p.stages) == 0 {
+		return ""
+	}
+	return p.stages[len(p.stages)-1].Name
 }
 
 // closeStage ends the running stage: failed if err is non-nil, else passed.

@@ -15,7 +15,7 @@ compiling
 ok pkg/a
 FAIL pkg/b
 exit status 1
-== stage building image app ==
+== stage build app ==
 `
 
 func TestStageFilter(t *testing.T) {
@@ -31,9 +31,17 @@ func TestStageFilter(t *testing.T) {
 	}
 }
 
+func TestStageNameMatchesExactlyNotBySuffix(t *testing.T) {
+	log := "== stage step integration test ==\nslow\n== stage step test ==\nfast\n"
+	out, err := logFilter{stage: "test"}.apply([]byte(log))
+	if err != nil || string(out) != "== stage step test ==\nfast\n" {
+		t.Errorf("--stage test = %q, %v; must not include \"integration test\"", out, err)
+	}
+}
+
 func TestStageFilterUnknownListsStages(t *testing.T) {
 	_, err := logFilter{stage: "lint"}.apply([]byte(sampleLog))
-	if err == nil || !strings.Contains(err.Error(), "step build, step test, building image app") {
+	if err == nil || !strings.Contains(err.Error(), "step build, step test, build app") {
 		t.Errorf("err = %v, want it to list the stages the run had", err)
 	}
 	_, err = logFilter{stage: "x"}.apply([]byte("no markers here\n"))

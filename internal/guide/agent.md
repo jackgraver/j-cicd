@@ -55,6 +55,7 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
   image name), `exit_code`, `timed_out`, and `tail`, the last lines of that
   stage's output with colour codes and progress redraws removed. Often that
   is the whole diagnosis.
+- A `cancelled` failure still names the stage that was interrupted.
 - `stages` lists every stage with its status and seconds, so you can see what
   passed. `exit_code` is j-cicd's own exit status.
 - `next` has ready-to-run commands (the failing stage's log, a rollback if
@@ -69,7 +70,8 @@ More output, only if the tail isn't enough:
 - `j-cicd logs <name|run-id> --tail 60` for the end of the log; `history`
   lists recorded runs; `cancel` stops a run in progress.
 - The log is marked per stage (`== stage step test ==`). Read one stage with
-  `logs <name> --stage test`, search with `--grep 'FAIL|panic' -C 3`. Off a
+  `logs <name> --stage test` (a stage's name, exactly, or `step test` /
+  `build app`), search with `--grep 'FAIL|panic' -C 3`. Off a
   terminal, colour codes and progress-bar redraws are stripped (`--raw` keeps
   them). `--stage` and `--grep` can't be combined with `-f`.
 - A failure at the verify stage means the release IS running but the public

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -226,7 +225,7 @@ func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	follow := fs.Bool("f", false, "keep printing output until the run finishes (raw, unfiltered)")
 	tail := fs.Int("tail", 0, "print only the last N lines (0 for all)")
-	stage := fs.String("stage", "", "print only this stage's output, e.g. test or \"step test\" or \"building image app\"")
+	stage := fs.String("stage", "", "print only this stage's output, by name (test) or kind and name (\"step test\", \"build app\")")
 	grep := fs.String("grep", "", "print only lines matching this regular expression")
 	ctxLines := fs.Int("C", 0, "with --grep, lines of context around each match")
 	plain := fs.Bool("plain", false, "strip colour codes and progress-bar redraws (the default when stdout isn't a terminal)")
@@ -290,19 +289,6 @@ func cmdLogs(args []string) error {
 	}
 	log.Printf("run %s %s", r.ID, r.Status)
 	return nil
-}
-
-// lastLines returns the last n lines of data.
-func lastLines(data []byte, n int) []byte {
-	end := len(data)
-	for ; n > 0 && end > 0; n-- {
-		i := bytes.LastIndexByte(data[:end-1], '\n')
-		if i < 0 {
-			return data
-		}
-		end = i + 1
-	}
-	return data[end:]
 }
 
 func cmdCancel(args []string) error {

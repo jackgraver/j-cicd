@@ -130,7 +130,51 @@ func TestShellQuoteAndHasJSONFlag(t *testing.T) {
 			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
 		}
 	}
-	if !hasJSONFlag([]string{"run", "--json"}) || hasJSONFlag([]string{"run", "x"}) {
-		t.Error("hasJSONFlag misreads args")
+	for args, want := range map[string]bool{
+		"run --json": true, "run -json": true, "run --json=true": true, "run --json=1": true,
+		"run --json=TRUE": true, "run --json=t": true, "run --json=false": false,
+		"run --json=0": false, "run x": false, "run --jsonx": false, "run json": false,
+	} {
+		if got := hasJSONFlag(strings.Fields(args)); got != want {
+			t.Errorf("hasJSONFlag(%q) = %v, want %v", args, got, want)
+		}
+	}
+}
+
+// Every command in `next` has to work: a hint that points at a stage that
+// isn't in the log is worse than none. Covers stages that print no progress
+// line of their own (artifacts, deploy-check) as well as an ordinary step.
+func TestNextStageHintsWork(t *testing.T) {
+	cases := map[string]string{
+		"artifacts": "name: art\nsteps:\n  - name: hi\n    run: echo hi\nartifacts:\n  - name: bin\n    path: dist/bin\n",
+		// Not a git repo, so the deploy is refused before anything runs.
+		"deploy-check": "name: dep\nsteps:\n  - name: hi\n    run: echo hi\nimages:\n  - repository: example.com/x\ndeploy:\n  host: nowhere\n",
+		"test":         "name: stp\nsteps:\n  - name: hi\n    run: echo hi\n  - name: test\n    run: exit 1\n",
+	}
+	for stage, config := range cases {
+		t.Run(stage, func(t *testing.T) {
+			obj, code := runJSON(t, "run", project(t, config), "--json", "--quiet")
+			if code != exitFailure {
+				t.Fatalf("code %d, obj %v", code, obj)
+			}
+			f, _ := obj["failure"].(map[string]any)
+			if f["stage"] != stage {
+				t.Fatalf("failure = %v, want stage %s", f, stage)
+			}
+			// The tail must not hold a passed stage's output ("hi").
+			tail, _ := f["tail"].([]any)
+			for _, l := range tail {
+				if l == "hi" {
+					t.Errorf("tail has an earlier stage's output: %v", f["tail"])
+				}
+			}
+			id := obj["id"].(string)
+			var out string
+			var logsCode int
+			out = captureStdout(t, func() { logsCode = appStart([]string{"logs", id, "--stage", stage}) })
+			if logsCode != exitOK || !strings.Contains(out, "== stage ") || !strings.Contains(out, " "+stage+" ==") {
+				t.Errorf("logs --stage %s: exit %d, output:\n%s", stage, logsCode, out)
+			}
+		})
 	}
 }

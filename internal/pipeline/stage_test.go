@@ -3,7 +3,11 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,5 +94,35 @@ func TestBuildFailureIsAttributedToTheImage(t *testing.T) {
 	var se *StageError
 	if !errors.As(err, &se) || se.Kind != KindBuild || se.Stage != "example.com/demo" {
 		t.Fatalf("error = %#v, want a build failure of image example.com/demo", err)
+	}
+}
+
+// A verify failure belongs to the check that failed, named by its URL, and
+// each stage announces itself through OnStage (even ones with no progress
+// line), so a log marker exists for every stage a failure can name.
+func TestVerifyFailureNamesTheCheckAndStagesAnnounceThemselves(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"commit":"stalestalest"}`)
+	}))
+	defer srv.Close()
+
+	var announced []string
+	p := verifyPipeline(&fakeRunner{})
+	p.onStage = func(kind, name string) { announced = append(announced, kind+":"+name) }
+	err := p.Run(context.Background(), verifyConfig(t, srv.URL, "20ms"))
+
+	var se *StageError
+	if !errors.As(err, &se) || se.Kind != KindVerify || se.Stage != srv.URL {
+		t.Fatalf("error = %#v, want a verify failure of %s", err, srv.URL)
+	}
+	if len(announced) == 0 || announced[len(announced)-1] != "verify:"+srv.URL {
+		t.Errorf("announced stages = %v, want the last to be verify:%s", announced, srv.URL)
+	}
+	var got []string
+	for _, s := range p.Stages() {
+		got = append(got, s.Kind+":"+s.Name)
+	}
+	if strings.Join(got, " ") != strings.Join(announced, " ") {
+		t.Errorf("stages %v != announced %v", got, announced)
 	}
 }
