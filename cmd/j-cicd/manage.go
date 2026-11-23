@@ -168,10 +168,15 @@ func cmdList(args []string) error {
 func cmdHistory(args []string) error {
 	fs := flag.NewFlagSet("history", flag.ContinueOnError)
 	limit := fs.Int("n", 20, "show at most this many runs (0 for all)")
+	fs.IntVar(limit, "limit", 20, "same as -n")
+	last := fs.Bool("last", false, "show only the most recent run (same as -n 1)")
 	asJSON := fs.Bool("json", false, "print runs as a JSON array on stdout (newest first)")
-	pos, err := parseFlagsOnly(fs, args, "[name] [-n count] [--json]", 0, 1)
+	pos, err := parseFlagsOnly(fs, args, "[name] [-n count | --limit count | --last] [--json]", 0, 1)
 	if err != nil {
 		return err
+	}
+	if *last {
+		*limit = 1
 	}
 	st, err := openStore()
 	if err != nil {

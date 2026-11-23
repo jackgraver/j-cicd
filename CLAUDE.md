@@ -268,7 +268,25 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   anything path-like is a directory as before. A registered directory is
   recorded under its registered name. See **Output and agents** below for
   `--plan`, `--json`, `-v` and `--quiet`.
-- `j-cicd history [name] [-n count] [--json]` — recorded runs, newest first.
+- `j-cicd deploy [name|project-dir] [run's flags]` — `run --plan` and
+  `run --commit <planned rev>` in one call: resolves the plan once, prints
+  its key lines to stderr, then runs pinned to that commit. Refuses `--plan`,
+  `--commit`, `--no-push` and `--no-deploy`; a project without `deploy:` is a
+  usage error.
+- `j-cicd check [name|project-dir] [--ref commit-ish] [--config path] [--json]
+  [--brief] [-v] [--quiet]` — run only the `steps:` (no docker check, images,
+  artifacts or deploy), so "will this pass?" reads the same config as the
+  pipeline. Without `--ref` it checks the directory as on disk, under the
+  project lock; with it, a clean throwaway worktree of that commit with the
+  config committed there (no lock), so a feature branch can be checked while
+  `branch:` names the release branch. Recorded as a run of kind `check`
+  (`manager.Check`, `pipeline.Options.StepsOnly`).
+- `--brief` (`run`, `deploy`, `rollback`, `check`) — stdout is one line on
+  success (`ok <project> <rev> deployed verified 43s`) and, on failure, only a
+  failure object (`status`, `id`, `failure`, `exit_code`, `next`, no stages).
+  Errors before a run is recorded are the usual `--json` error object.
+- `j-cicd history [name] [-n count | --limit count | --last] [--json]` —
+  recorded runs, newest first.
 - `j-cicd logs <run-id|name> [-f] [--tail N] [--stage s] [--grep re [-C N]]
   [--plain|--raw]` — a run's output (a name means its latest run); `-f`
   follows it until it finishes (raw), `--tail N` prints only the last N
@@ -284,7 +302,8 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   the config's `deploy:` section. Recorded as a run of kind `rollback`.
 - `j-cicd init [project-dir] [--name n] [--force]` — scaffold a starter
   `.cicd.yaml`.
-- `j-cicd guide` — print the operating guide for AI agents using j-cicd
+- `j-cicd guide [--short]` — print the operating guide (`--short`: only the
+  "Short version" section at its top) for AI agents using j-cicd
   (`internal/guide/agent.md`, embedded in the binary so it always matches the
   installed version). Project CLAUDE.md files should point agents here rather
   than restate how j-cicd works.

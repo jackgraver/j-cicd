@@ -41,6 +41,10 @@ type Options struct {
 	// "-dirty" revision). Off by default so work in progress can't reach
 	// production by accident.
 	DeployDirty bool
+	// StepsOnly runs just the config's steps: no docker check, images,
+	// artifacts or deploy. It is what `j-cicd check` uses to ask "would the
+	// steps pass?" without publishing or deploying anything.
+	StepsOnly bool
 	// Runner executes the individual commands. Nil means ExecRunner —
 	// tests substitute a fake here.
 	Runner CommandRunner
@@ -74,6 +78,7 @@ type Pipeline struct {
 	deploy      bool
 	revision    string
 	deployDirty bool
+	stepsOnly   bool
 	runner      CommandRunner
 	log         *log.Logger
 	progress    io.Writer
@@ -100,6 +105,7 @@ func New(projectDir string, opts Options) *Pipeline {
 		deploy:      opts.Deploy,
 		revision:    opts.Revision,
 		deployDirty: opts.DeployDirty,
+		stepsOnly:   opts.StepsOnly,
 		runner:      opts.Runner,
 		log:         opts.Logger,
 		progress:    opts.Progress,
@@ -138,7 +144,7 @@ func (p *Pipeline) Run(ctx context.Context, cfg *config.Config) error {
 func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 	p.log.Printf("running pipeline for %q", cfg.Name)
 
-	deploying := cfg.Deploy != nil && p.push && p.deploy
+	deploying := cfg.Deploy != nil && p.push && p.deploy && !p.stepsOnly
 	var deployRefs []string
 	if deploying {
 		// Checked up front: finding out after a long build and a push
@@ -151,7 +157,7 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 		deployRefs = refs
 	}
 
-	if len(cfg.Images) > 0 {
+	if len(cfg.Images) > 0 && !p.stepsOnly {
 		// Before the steps, not at the first docker build: a daemon that
 		// isn't reachable should fail the run in a second, with the
 		// reason as the run's error, not after a full build and test.
@@ -174,6 +180,11 @@ func (p *Pipeline) run(ctx context.Context, cfg *config.Config) error {
 		if err := p.exec(ctx, timeout, dir, "sh", "-c", step.Run); err != nil {
 			return stageErr(KindStep, step.Name, err, "step %q failed: %v", step.Name, err)
 		}
+	}
+
+	if p.stepsOnly {
+		p.log.Printf("steps of %q completed successfully (check only: no images, artifacts or deploy)", cfg.Name)
+		return nil
 	}
 
 	timeout := cfg.ImageTimeout(DefaultTimeout)

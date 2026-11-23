@@ -38,11 +38,15 @@ const DefaultKeepRuns = 50
 // instead of running its pipeline.
 const KindRollback = "rollback"
 
+// KindCheck marks a run that only ran the config's steps (`j-cicd check`):
+// nothing built into an image, pushed or deployed.
+const KindCheck = "check"
+
 // Run is one recorded pipeline run.
 type Run struct {
 	ID      string `json:"id"`
 	Project string `json:"project"`
-	// Kind is "" for a pipeline run, or KindRollback.
+	// Kind is "" for a pipeline run, KindRollback or KindCheck.
 	Kind   string `json:"kind,omitempty"`
 	Dir    string `json:"dir"`
 	Config string `json:"config"`

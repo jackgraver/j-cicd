@@ -45,6 +45,8 @@ type Options struct {
 	// reports) instead of the branch's tip, so a run can't build something
 	// other than what was reviewed. It needs branch: in the config.
 	Commit string
+	// StepsOnly runs only the config's steps (see pipeline.Options).
+	StepsOnly bool
 	// Echo, if set, also receives everything written to the run log (the
 	// CLI passes stderr so a foreground run is visible as it happens).
 	Echo io.Writer
@@ -466,6 +468,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Deploy:      opts.Deploy,
 		Revision:    revision,
 		DeployDirty: opts.DeployDirty,
+		StepsOnly:   opts.StepsOnly,
 		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
 		Logger:      env.log,
 		Progress:    env.stages,

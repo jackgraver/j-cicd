@@ -59,6 +59,10 @@ func appStart(args []string) int {
 		err = cmdUI(args[1:])
 	case "run":
 		err = cmdRun(args[1:])
+	case "deploy":
+		err = cmdDeploy(args[1:])
+	case "check":
+		err = cmdCheck(args[1:])
 	case "rollback":
 		err = cmdRollback(args[1:])
 	case "add":
