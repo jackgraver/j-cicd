@@ -30,10 +30,15 @@ type Plan struct {
 	Busy string `json:"busy_run,omitempty"`
 	// Upstream is what the built branch tracks ("" if nothing), and
 	// Ahead/Behind how many commits it differs by, as of the last fetch.
-	// j-cicd builds the local branch whatever these say.
-	Upstream string   `json:"upstream,omitempty"`
-	Ahead    int      `json:"ahead,omitempty"`
-	Behind   int      `json:"behind,omitempty"`
+	// Without a remote j-cicd builds the local branch whatever these say.
+	// With one it builds the remote's copy: Upstream is that copy, Ahead is
+	// local commits left out of the build, and Behind is always omitted.
+	Upstream string `json:"upstream,omitempty"`
+	Ahead    int    `json:"ahead,omitempty"`
+	Behind   int    `json:"behind,omitempty"`
+	// Remote is the git remote the branch was fetched from ("" for the
+	// local branch). Revision is the commit `run --commit` pins to.
+	Remote   string   `json:"remote,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 	pipeline.Plan
 }
@@ -43,6 +48,8 @@ func (p *Plan) Describe() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "plan for %q (nothing was run)\n", p.Project)
 	switch {
+	case p.Branch != "" && p.Remote != "" && p.Revision != "":
+		fmt.Fprintf(&b, "  source:  %s/%s at %s (fetched just now), from a clean checkout\n", p.Remote, p.Branch, p.Revision)
 	case p.Branch != "" && p.Revision != "":
 		fmt.Fprintf(&b, "  source:  local branch %s at %s, from a clean checkout (not origin's copy)\n", p.Branch, p.Revision)
 	case p.Revision != "":
@@ -51,10 +58,16 @@ func (p *Plan) Describe() string {
 		fmt.Fprintf(&b, "  source:  %s as it is on disk (no git revision)\n", p.Dir)
 	}
 	switch {
+	case p.Remote != "":
+		// Built from the remote itself: only unpushed commits matter, and
+		// those come through as a warning.
 	case p.Upstream == "" && p.Revision != "":
 		fmt.Fprintf(&b, "  sync:    no upstream configured, so there is nothing to compare the local commit with\n")
 	case p.Upstream != "" && p.Ahead == 0 && p.Behind == 0:
 		fmt.Fprintf(&b, "  sync:    in sync with %s (as of the last fetch)\n", p.Upstream)
+	}
+	if p.Branch != "" && p.Revision != "" {
+		fmt.Fprintf(&b, "  pin:     j-cicd run %s --commit %s builds exactly this commit, even if the branch moves\n", p.Project, p.Revision)
 	}
 	for i, s := range p.Steps {
 		fmt.Fprintf(&b, "  step %d:  %s: %s\n", i+1, s.Name, s.Run)
@@ -123,18 +136,25 @@ func MakePlan(ctx context.Context, st *store.Store, t Target, opts Options) (*Pl
 	}
 
 	var rel *release
-	ref := "HEAD"
 	if cfg.Branch != "" {
-		if rel, err = resolveRelease(ctx, dir, cfg.Branch); err != nil {
+		if rel, err = resolveRelease(ctx, dir, cfg.Branch, cfg.Remote, opts.Commit); err != nil {
 			plan.Problems = append(plan.Problems, err.Error())
 			return plan, nil
 		}
-		plan.Branch, plan.Revision, ref = rel.branch, rel.revision, rel.branch
+		plan.Branch, plan.Remote, plan.Revision = rel.branch, rel.remote, rel.revision
+	} else if opts.Commit != "" {
+		plan.Problems = append(plan.Problems, "--commit needs branch: in the config, so there is a release history to take the commit from")
+		return plan, nil
 	}
 	plan.Dirty = rel == nil && strings.HasSuffix(plan.Revision, "-dirty")
-	if s, ok := upstreamSync(ctx, dir, ref); ok {
+	if s, ok := releaseSync(ctx, dir, rel); ok {
 		plan.Upstream, plan.Ahead, plan.Behind = s.Upstream, s.Ahead, s.Behind
-		if note := formatSync(refName(ref), s.Upstream, s.Ahead, s.Behind); note != "" {
+		if rel != nil && rel.remote != "" {
+			// The build is the remote's copy, so the local branch being
+			// behind it says nothing about staleness; only ahead matters.
+			plan.Behind = 0
+		}
+		if note := syncNote(rel, s); note != "" {
 			plan.Warnings = append(plan.Warnings, note)
 		}
 	}

@@ -41,6 +41,10 @@ type Options struct {
 	// Deploy runs the config's deploy: stage after pushing; DeployDirty
 	// allows that for a build of uncommitted changes.
 	Deploy, DeployDirty bool
+	// Commit pins a release-branch run to one commit (as `run --plan`
+	// reports) instead of the branch's tip, so a run can't build something
+	// other than what was reviewed. It needs branch: in the config.
+	Commit string
 	// Echo, if set, also receives everything written to the run log (the
 	// CLI passes stderr so a foreground run is visible as it happens).
 	Echo io.Writer
@@ -103,19 +107,17 @@ func Run(ctx context.Context, st *store.Store, t Target, opts Options) (store.Ru
 	var rel *release
 	var relErr error
 	if cfg, err := config.Load(configPath, ""); err == nil && cfg.Branch != "" {
-		rel, relErr = resolveRelease(ctx, dir, cfg.Branch)
+		rel, relErr = resolveRelease(ctx, dir, cfg.Branch, cfg.Remote, opts.Commit)
 		if relErr == nil {
 			revision, hasRevision = rel.revision, true
 		}
+	} else if err == nil && opts.Commit != "" {
+		relErr = errors.New("--commit needs branch: in the config, so there is a release history to take the commit from")
 	}
 
 	// How the built commit relates to its remote, so nobody has to guess
 	// whether "main" meant the local branch or origin's.
-	ref := "HEAD"
-	if rel != nil {
-		ref = rel.branch
-	}
-	syncNote := syncWarning(ctx, dir, ref)
+	syncNote := syncWarning(ctx, dir, rel)
 
 	return record(ctx, st, store.Run{
 		Project:  t.Name,
@@ -412,7 +414,7 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 		return &prepared{dir: dir, cfg: cfg, cleanup: func() {}}, nil
 	}
 
-	env.log.Printf("building the local branch %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.branch, rel.revision, dir)
+	env.log.Printf("building %s at %s from a clean checkout (uncommitted changes and other branches in %s are not included)", rel.source(), rel.revision, dir)
 	snap, err := createSnapshot(ctx, snapDir, dir, rel)
 	if err != nil {
 		return nil, err
@@ -440,6 +442,9 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 	}
 	if cfg.Branch != rel.branch {
 		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
+	}
+	if cfg.Remote != rel.remote {
+		env.warnf("the config committed on %s doesn't say remote: %q (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.remote)
 	}
 	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil
 }

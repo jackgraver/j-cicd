@@ -67,6 +67,11 @@ func TestParseRunArgs(t *testing.T) {
 			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: true, deployDirty: true},
 		},
 		{
+			name: "commit",
+			args: []string{"--commit", "617b4aa", "/proj"},
+			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: true, commit: "617b4aa"},
+		},
+		{
 			name: "no-deploy after project dir",
 			args: []string{"/proj", "--no-deploy"},
 			want: runArgs{projectDir: "/proj", configPath: filepath.Join("/proj", ".cicd.yaml"), push: true, deploy: false},
