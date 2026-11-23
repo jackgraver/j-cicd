@@ -141,6 +141,9 @@ func (m *model) reload() {
 
 	m.last = make(map[string]store.Run)
 	for _, r := range all {
+		if r.Kind == store.KindCheck {
+			continue // a check isn't a release: it must not hide a failed deploy
+		}
 		if _, seen := m.last[r.Project]; !seen {
 			m.last[r.Project] = r
 		}

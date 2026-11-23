@@ -59,7 +59,13 @@ const (
 	errKindNotFound = "not_found"
 	errKindBusy     = "busy"
 	errKindInternal = "internal"
+	// errKindRefused is a run j-cicd would not start (a dirty tree, no
+	// per-commit tag): fix what the message names, don't report a bug.
+	errKindRefused = "refused"
 )
+
+// errRefused wraps the reason a plan says a run would be refused.
+var errRefused = errors.New("refused")
 
 // jsonError is what a command prints under --json when no run was
 // recorded, so there is always exactly one object to parse.
@@ -97,6 +103,11 @@ func toJSONError(err error, project string) jsonError {
 		if project != "" {
 			e.Next = []string{"j-cicd logs " + project + " -f", "j-cicd cancel " + project}
 		}
+	case errors.Is(err, errRefused):
+		e.ErrorKind = errKindRefused
+		if project != "" {
+			e.Next = []string{"j-cicd run " + project + " --plan"}
+		}
 	case errors.Is(err, errNoProject):
 		e.ErrorKind = errKindNotFound
 		e.Next = []string{"j-cicd list"}
@@ -119,7 +130,10 @@ func jsonFail(err error, project string, asJSON bool) error {
 
 // hasJSONFlag reports whether args ask for --json, for errors raised while
 // parsing the args themselves.
-func hasJSONFlag(args []string) bool {
+func hasJSONFlag(args []string) bool { return hasBoolFlag(args, "json") }
+
+// hasBoolFlag reports whether args set the boolean flag name.
+func hasBoolFlag(args []string, want string) bool {
 	asJSON := false
 	for _, a := range args {
 		flagName, ok := strings.CutPrefix(a, "--")
@@ -130,7 +144,7 @@ func hasJSONFlag(args []string) bool {
 			continue
 		}
 		name, value, hasValue := strings.Cut(flagName, "=")
-		if name != "json" {
+		if name != want {
 			continue
 		}
 		if !hasValue {
@@ -142,6 +156,56 @@ func hasJSONFlag(args []string) bool {
 	}
 	// The last one wins, as it does for the flag package.
 	return asJSON
+}
+
+// briefLine is --brief's whole output for a run that succeeded:
+//
+//	ok simple-track 7b2eed0ec256 deployed verified 43s
+//
+// The words after the revision say what the run did.
+func briefLine(r store.Run) string {
+	rev := r.Revision
+	if rev == "" {
+		rev = "-"
+	}
+	words := []string{"ok", r.Project, rev}
+	switch {
+	case r.Kind == store.KindRollback:
+		words = append(words, "rolled-back")
+	case r.Kind == store.KindCheck:
+		words = append(words, "checked")
+	case r.Deployed:
+		words = append(words, "deployed")
+	case len(r.Images) > 0:
+		words = append(words, "pushed")
+	case len(r.Artifacts) > 0:
+		words = append(words, "hashed")
+	default:
+		words = append(words, "built")
+	}
+	if len(r.Verified) > 0 {
+		words = append(words, "verified")
+	}
+	words = append(words, fmt.Sprintf("%.0fs", r.Duration().Seconds()))
+	return strings.Join(words, " ")
+}
+
+// jsonBriefFailure is --brief's output for a run that didn't succeed: only
+// what is needed to act on the failure, not the stages that passed.
+type jsonBriefFailure struct {
+	Status   string            `json:"status"`
+	ID       string            `json:"id"`
+	Project  string            `json:"project"`
+	Revision string            `json:"revision,omitempty"`
+	Deployed bool              `json:"deployed,omitempty"`
+	Failure  *store.RunFailure `json:"failure,omitempty"`
+	ExitCode int               `json:"exit_code"`
+	Next     []string          `json:"next,omitempty"`
+}
+
+func toJSONBriefFailure(r store.Run, exitCode int) jsonBriefFailure {
+	return jsonBriefFailure{Status: string(r.Status), ID: r.ID, Project: r.Project, Revision: r.Revision,
+		Deployed: r.Deployed, Failure: r.Failure, ExitCode: exitCode, Next: nextSteps(r)}
 }
 
 // nextSteps are commands worth running after a run that didn't succeed.

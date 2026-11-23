@@ -45,6 +45,8 @@ type Options struct {
 	// reports) instead of the branch's tip, so a run can't build something
 	// other than what was reviewed. It needs branch: in the config.
 	Commit string
+	// StepsOnly runs only the config's steps (see pipeline.Options).
+	StepsOnly bool
 	// Echo, if set, also receives everything written to the run log (the
 	// CLI passes stderr so a foreground run is visible as it happens).
 	Echo io.Writer
@@ -71,12 +73,20 @@ func (e *ConfigError) Unwrap() error { return e.Err }
 
 // Busy returns the project's in-progress run, if it has one.
 func Busy(st *store.Store, project string) (store.Run, bool, error) {
-	runs, err := st.Runs(project, 1)
+	runs, err := st.Runs(project, 0)
 	if err != nil {
 		return store.Run{}, false, err
 	}
-	if len(runs) == 1 && !runs[0].Status.Done() {
-		return runs[0], true, nil
+	// The lock, not this, is what excludes a second run. Checks of a commit
+	// take none and don't touch what a run builds, so they aren't "busy".
+	for _, r := range runs {
+		if r.Kind == store.KindCheck {
+			continue
+		}
+		if !r.Status.Done() {
+			return r, true, nil
+		}
+		break
 	}
 	return store.Run{}, false, nil
 }
@@ -466,6 +476,7 @@ func execute(ctx context.Context, dir string, cfg *config.Config, revision strin
 		Deploy:      opts.Deploy,
 		Revision:    revision,
 		DeployDirty: opts.DeployDirty,
+		StepsOnly:   opts.StepsOnly,
 		Runner:      runnerFor(opts, env.out, stepEnv(revision)...),
 		Logger:      env.log,
 		Progress:    env.stages,

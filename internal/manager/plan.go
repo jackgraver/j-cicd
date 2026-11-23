@@ -113,6 +113,38 @@ func (p *Plan) Describe() string {
 	return b.String()
 }
 
+// Summary is the plan's key lines for `deploy`, which goes on to run it:
+// the commit and where it comes from, the images or files, and the host.
+func (p *Plan) Summary() string {
+	var b strings.Builder
+	rev := p.Revision
+	if rev == "" {
+		rev = "(no git revision)"
+	}
+	fmt.Fprintf(&b, "deploying %s at %s", p.Project, rev)
+	switch {
+	case p.Branch != "" && p.Remote != "":
+		fmt.Fprintf(&b, " (%s/%s)", p.Remote, p.Branch)
+	case p.Branch != "":
+		fmt.Fprintf(&b, " (local branch %s)", p.Branch)
+	}
+	if d := p.Deploy; d != nil {
+		what := strings.Join(d.Images, ", ")
+		if len(d.Artifacts) > 0 {
+			what = strings.Join(d.Artifacts, ", ")
+		}
+		host := d.Host
+		if host == config.LocalTarget {
+			host = "this machine"
+		}
+		fmt.Fprintf(&b, ": %s to %s", what, host)
+	}
+	for _, w := range p.Warnings {
+		fmt.Fprintf(&b, "\n  warning: %s", w)
+	}
+	return b.String()
+}
+
 // MakePlan works out what Run(t, opts) would do. It takes no lock and
 // records nothing; a release branch is checked out into a throwaway
 // worktree to read the config and compose file as committed there, so the

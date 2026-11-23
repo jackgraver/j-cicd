@@ -5,6 +5,20 @@ compiled into the binary you are running, so it matches this version. Prefer
 asking the tool over trusting remembered details: `j-cicd run --plan`,
 `j-cicd <command> -h`, `j-cicd logs`.
 
+## Short version
+
+`j-cicd guide --short` prints just this section; the rest is by topic.
+
+- Deploy: `j-cicd deploy <name> --brief` plans, then runs pinned to the
+  planned commit. To ask the user first, `j-cicd run <name> --plan`.
+- Ask the user before a production deploy unless they already said to deploy.
+- Before merging: `j-cicd check <name> --ref <branch> --brief` runs the
+  config's steps on that branch, nothing else.
+- `--brief` prints one line on success (`ok <name> <rev> deployed verified
+  43s`) and only the failure object on failure. Read `failure.tail` first.
+- Failures, `logs`, `history --last`: see "When a run fails". Undo: `rollback`.
+- Never build images by hand or ssh to the VPS to deploy.
+
 ## Rules
 
 - Deploy through j-cicd only. Never build images by hand or ssh to the VPS to
@@ -32,6 +46,20 @@ there is nothing to decide each time (without `branch:`, drop `--commit`):
 
     j-cicd run <name> --plan            # review the commit, steps, deploy host
     j-cicd run <name> --commit <rev> --json   # <rev> = the plan's revision
+
+When the user has already said to deploy, do both in one call:
+`j-cicd deploy <name> [--brief|--json]` resolves the plan once, prints its key
+lines (commit, images or files, host) to stderr, and runs pinned to that
+commit. That pin needs `branch:` in the config; without it the run builds the
+working tree as it is when it starts, so a commit made in between would ship
+(`--plan` says which applies). Use `run --plan` when you need to ask the user
+in between. A plan problem (dirty tree, no per-commit tag) is reported as
+`error_kind: "refused"`: fix what it names.
+
+`--brief` (on `run`, `deploy`, `rollback`, `check`) keeps the output small: one
+stdout line when the run passes, e.g. `ok simple-track 7b2eed0ec256 deployed
+verified 43s`, and only a failure object (`failure`, `next`, `exit_code`)
+when it doesn't. `--json` is the full record.
 
 `--commit` ties the run to what you reviewed: it builds exactly that commit
 (it must be in the release branch's history, and needs `branch:`), even if
@@ -61,9 +89,11 @@ found late. Run the same steps before merging. For a project without
 `branch:`, `j-cicd run <name> --no-push --no-deploy` builds the working tree
 (steps, images, artifacts) without pushing or deploying, so it checks the
 pipeline end to end. With `branch:` set it builds the release branch, not
-your feature branch, so it can't check a PR; run the project's own check
-command (steps from `.cicd.yaml`) on the PR branch, or add a pull-request CI
-check that runs the same steps.
+your feature branch, so it can't check a PR. Use `j-cicd check <name>`: it runs
+only the `steps:` from `.cicd.yaml` (no images, push or deploy) against the
+directory as it is on disk, or with `--ref <branch|sha>` against a clean
+checkout of that commit using the config committed there. It is recorded in
+history as a `check` run, and takes `--brief`, `--json` and `-v` like `run`.
 
 ## Project kinds
 
@@ -92,9 +122,13 @@ check that runs the same steps.
 - `next` has ready-to-run commands (the failing stage's log, a rollback if
   something is already deployed).
 - With no run recorded (unknown project, bad flag, busy project) the object is
-  `{"status":"error","error_kind":"usage|config|not_found|busy|internal",
+  `{"status":"error","error_kind":"usage|config|not_found|busy|refused|internal",
   "error":...,"exit_code":N}`.
-- `history --json` has the same `failure` and `stages` for earlier runs.
+- `history --json` has the same `failure` and `stages` for earlier runs;
+  `history <name> --last` (or `--limit N`) keeps it to the latest. `check`
+  runs are left out of `history`, `list`, the dashboard and `logs <name>` so
+  the latest run is the latest release; `history --checks` includes them and
+  `logs <run-id>` reads one.
 
 More output, only if the tail isn't enough:
 

@@ -38,6 +38,8 @@ Usage:
   j-cicd list                  list projects and their latest result
 
   j-cicd run [name|dir]        run a pipeline (steps, docker build+push, then deploy)
+  j-cicd deploy [name|dir]     plan, then run pinned to the planned commit (one call)
+  j-cicd check [name|dir]      run only the steps (no images, push or deploy); --ref checks a commit
   j-cicd history [name]        list recorded runs, newest first
   j-cicd logs <run-id|name>    print a run's output (a name means its latest run; --stage, --grep, --tail, --plain)
   j-cicd cancel <run-id|name>  stop a run in progress
@@ -51,8 +53,9 @@ Output: at a terminal, run streams everything. Anywhere else (a pipe, a
 script, an agent) it prints one line per stage and, if something fails, the
 last lines of the failing command; -v streams everything, --quiet prints only
 the final status. The full output is always recorded: j-cicd logs <run-id>.
---json (run, rollback, list, history) prints machine-readable results on
-stdout; prose and progress always go to stderr. run --plan shows what would
+--json (run, rollback, check, deploy, list, history) prints machine-readable
+results on stdout; --brief prints one line on success and only the failure
+object otherwise; prose and progress always go to stderr. run --plan shows what would
 happen without doing it.
 
 Exit status: 0 success; 1 the pipeline (or rollback) failed or was cancelled;
@@ -92,6 +95,8 @@ type runArgs struct {
 	// verbose streams all command output; json prints the result as JSON
 	// on stdout; plan only reports what would happen.
 	verbose, json, plan bool
+	// brief prints one line (success) or the failure object on stdout.
+	brief bool
 }
 
 func parseRunArgs(args []string) (runArgs, error) {
@@ -102,6 +107,7 @@ func parseRunArgs(args []string) (runArgs, error) {
 	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal; elsewhere only stage lines and a failure's last lines are shown)")
 	fs.BoolVar(verbose, "v", false, "same as --verbose")
 	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout (run id, status, commit, pushed image digests)")
+	brief := fs.Bool("brief", false, "print one line on stdout when the run passes, or only the failure object (stage, kind, exit code, tail, next) when it doesn't")
 	plan := fs.Bool("plan", false, "show what would run (commit, steps, images, deploy host) without running, building, pushing or deploying")
 	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
 	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
@@ -113,7 +119,7 @@ func parseRunArgs(args []string) (runArgs, error) {
 	}
 
 	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty, commit: *commit,
-		verbose: *verbose, json: *asJSON, plan: *plan}
+		verbose: *verbose, json: *asJSON, plan: *plan, brief: *brief}
 	parsed.defaultPaths()
 	return parsed, nil
 }
@@ -143,16 +149,21 @@ func cmdRun(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
-		return jsonFail(usageError(err), "", hasJSONFlag(args))
+		return jsonFail(usageError(err), "", hasJSONFlag(args) || hasBoolFlag(args, "brief"))
 	}
+	return runParsed(parsed)
+}
 
+// runParsed is `run` after flag parsing, and the pipeline half of `deploy`.
+func runParsed(parsed runArgs) error {
+	machine := parsed.json || parsed.brief
 	st, err := openStore()
 	if err != nil {
-		return jsonFail(err, "", parsed.json)
+		return jsonFail(err, "", machine)
 	}
 	target, err := resolveRunTarget(st, parsed)
 	if err != nil {
-		return jsonFail(err, "", parsed.json)
+		return jsonFail(err, "", machine)
 	}
 
 	// Ctrl-C / SIGTERM cancels the run: in-flight steps are killed rather
@@ -165,9 +176,104 @@ func cmdRun(args []string) error {
 	if parsed.plan {
 		return cmdPlan(ctx, st, target, opts, parsed.json)
 	}
-	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, parsed.json)
+	opts.Echo, opts.Progress = outputMode(parsed.quiet, parsed.verbose, machine)
 	run, err := manager.Run(ctx, st, target, opts)
-	return reportRun(run, err, "pipeline failed", parsed.json, target.Name)
+	return reportRun(run, err, "pipeline failed", parsed.json, parsed.brief, target.Name)
+}
+
+// cmdCheck is `check`: the config's steps against the directory, or against
+// a commit with --ref, and nothing else.
+func cmdCheck(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to pipeline config (default: <project-dir>/"+config.DefaultFile+")")
+	ref := fs.String("ref", "", "check this commit (branch, PR head, SHA) in a clean checkout, with the config committed there, instead of the directory as it is on disk")
+	quiet := fs.Bool("quiet", false, "print nothing but the final status")
+	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
+	fs.BoolVar(verbose, "v", false, "same as --verbose")
+	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
+	brief := fs.Bool("brief", false, "print one line on stdout when it passes, or only the failure object when it doesn't")
+	dir, err := parseCommandFlags(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return jsonFail(usageError(err), "", hasJSONFlag(args) || hasBoolFlag(args, "brief"))
+	}
+	parsed := runArgs{projectDir: dir, configPath: *configPath}
+	parsed.defaultPaths()
+	machine := *asJSON || *brief
+
+	st, err := openStore()
+	if err != nil {
+		return jsonFail(err, "", machine)
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return jsonFail(err, "", machine)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	opts := manager.Options{}
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, machine)
+	run, err := manager.Check(ctx, st, target, *ref, opts)
+	return reportRun(run, err, "check failed", *asJSON, *brief, target.Name)
+}
+
+// cmdDeploy is `deploy`: resolve the plan once, show its key lines, then run
+// pinned to the planned commit, so what ships is what was just resolved
+// without a second call and a copy-paste of the revision. Use `run --plan`
+// to stop and ask first.
+func cmdDeploy(args []string) error {
+	parsed, err := parseRunArgs(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return jsonFail(usageError(err), "", hasJSONFlag(args) || hasBoolFlag(args, "brief"))
+	}
+	machine := parsed.json || parsed.brief
+	switch {
+	case parsed.plan:
+		return jsonFail(usageError(errors.New("deploy always plans first; use `run --plan` to only look")), "", machine)
+	case parsed.commit != "":
+		return jsonFail(usageError(errors.New("deploy pins the commit itself; use `run --commit` to choose one")), "", machine)
+	case !parsed.push || !parsed.deploy:
+		return jsonFail(usageError(errors.New("deploy pushes and deploys; use `run` with --no-push or --no-deploy")), "", machine)
+	}
+
+	st, err := openStore()
+	if err != nil {
+		return jsonFail(err, "", machine)
+	}
+	target, err := resolveRunTarget(st, parsed)
+	if err != nil {
+		return jsonFail(err, "", machine)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	plan, err := manager.MakePlan(ctx, st, target, manager.Options{Push: true, Deploy: true, DeployDirty: parsed.deployDirty})
+	if err != nil {
+		if configErr := (*manager.ConfigError)(nil); errors.As(err, &configErr) {
+			err = &exitError{code: exitConfig, err: err}
+		}
+		return jsonFail(err, target.Name, machine)
+	}
+	if plan.Deploy == nil {
+		return jsonFail(usageError(fmt.Errorf("%s has no deploy: section, so there is nothing to deploy (use `run` to build and push)", target.Name)), target.Name, machine)
+	}
+	if len(plan.Problems) > 0 {
+		log.Print(plan.Describe())
+		return jsonFail(fmt.Errorf("%w: this deploy would fail: %s (--deploy-dirty overrides a dirty tree)", errRefused, strings.Join(plan.Problems, "; ")), target.Name, machine)
+	}
+	if !parsed.quiet {
+		log.Print(plan.Summary())
+	}
+	if plan.Branch != "" {
+		parsed.commit = plan.Revision
+	}
+	return runParsed(parsed)
 }
 
 // outputMode picks what a foreground run shows on stderr. At a terminal
@@ -217,23 +323,25 @@ func cmdRollback(args []string) error {
 	verbose := fs.Bool("verbose", false, "stream every command's output (the default at a terminal)")
 	fs.BoolVar(verbose, "v", false, "same as --verbose")
 	asJSON := fs.Bool("json", false, "print the result as one JSON object on stdout")
+	brief := fs.Bool("brief", false, "print one line on stdout when it passes, or only the failure object when it doesn't")
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
-		return jsonFail(usageError(err), "", hasJSONFlag(args))
+		return jsonFail(usageError(err), "", hasJSONFlag(args) || hasBoolFlag(args, "brief"))
 	}
 	parsed := runArgs{projectDir: dir, configPath: *configPath}
 	parsed.defaultPaths()
 
+	machine := *asJSON || *brief
 	st, err := openStore()
 	if err != nil {
-		return jsonFail(err, "", *asJSON)
+		return jsonFail(err, "", machine)
 	}
 	target, err := resolveRunTarget(st, parsed)
 	if err != nil {
-		return jsonFail(err, "", *asJSON)
+		return jsonFail(err, "", machine)
 	}
 
 	// Ctrl-C cancels it like a run; the agent then puts back what was
@@ -242,16 +350,16 @@ func cmdRollback(args []string) error {
 	defer stop()
 
 	opts := manager.Options{}
-	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, *asJSON)
+	opts.Echo, opts.Progress = outputMode(*quiet, *verbose, machine)
 	run, err := manager.Rollback(ctx, st, target, opts)
-	return reportRun(run, err, "rollback failed", *asJSON, target.Name)
+	return reportRun(run, err, "rollback failed", *asJSON, *brief, target.Name)
 }
 
 // reportRun says how a recorded run ended and maps its error to an exit
 // code. The prose goes to stderr; with asJSON the result is also printed
 // to stdout as JSON, even when the run failed, so a script always has one
 // object to parse (and the exit status to go with it).
-func reportRun(run store.Run, err error, failed string, asJSON bool, project string) error {
+func reportRun(run store.Run, err error, failed string, asJSON, brief bool, project string) error {
 	if run.ID != "" && run.Status.Done() {
 		line := fmt.Sprintf("run %s %s after %s", run.ID, run.Status, display.Duration(run.Duration()))
 		if run.Revision != "" {
@@ -301,9 +409,15 @@ func reportRun(run store.Run, err error, failed string, asJSON bool, project str
 		}
 	}
 
-	if asJSON {
+	if asJSON || brief {
 		var out any
-		if run.ID != "" {
+		if run.ID != "" && brief && result == nil {
+			// One line, not JSON: the whole success report.
+			fmt.Println(briefLine(run))
+			return nil
+		} else if run.ID != "" && brief {
+			out = toJSONBriefFailure(run, exitCodeOf(result))
+		} else if run.ID != "" {
 			out = toJSONResult(run, exitCodeOf(result))
 		} else {
 			// Nothing was recorded (config didn't load, project busy):

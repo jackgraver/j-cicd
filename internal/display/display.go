@@ -61,8 +61,11 @@ func Duration(d time.Duration) string {
 // Mode describes what a run did: rolled back, or built with or without
 // pushing its images.
 func Mode(r store.Run) string {
-	if r.Kind == store.KindRollback {
+	switch r.Kind {
+	case store.KindRollback:
 		return "rollback"
+	case store.KindCheck:
+		return "check"
 	}
 	if r.Push {
 		return "push"
