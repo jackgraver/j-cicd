@@ -30,6 +30,10 @@ type Config struct {
 	// directory as it is on disk, so uncommitted work and whatever branch
 	// happens to be checked out can never reach a registry or the VPS.
 	Branch string `yaml:"branch,omitempty"`
+	// Remote, with branch: set, makes a run fetch that branch from this git
+	// remote and build the remote's copy rather than the local branch, so
+	// a PR merged there ships without anyone pulling first.
+	Remote string `yaml:"remote,omitempty"`
 	// Timeout is the default time limit for each individual step and
 	// docker command. Unset means the runner's built-in default; an
 	// explicit 0 means no limit.
@@ -151,6 +155,14 @@ func (c *Config) applyDefaults(revision string) error {
 	// a branch name; anything subtler is git's to reject when resolving it.
 	if c.Branch != "" && (strings.HasPrefix(c.Branch, "-") || strings.ContainsAny(c.Branch, " \t\n")) {
 		return fmt.Errorf("branch %q is not a valid branch name", c.Branch)
+	}
+	if c.Remote != "" {
+		if c.Branch == "" {
+			return errors.New("remote: needs branch: (the branch to fetch from it)")
+		}
+		if strings.HasPrefix(c.Remote, "-") || strings.ContainsAny(c.Remote, " \t\n/:") {
+			return fmt.Errorf("remote %q is not a valid remote name", c.Remote)
+		}
 	}
 	if len(c.Steps) == 0 && len(c.Images) == 0 && len(c.Artifacts) == 0 {
 		return errors.New("must define at least one step, image or artifact")

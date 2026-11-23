@@ -17,8 +17,27 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
   changes are left out (and don't block), so commit what should ship. Without
   `branch:` it builds the working tree, and a dirty tree is refused for a
   deploy (`--deploy-dirty` overrides). `--plan` states which applies.
+- With `remote: origin` next to `branch:`, a run first fetches that branch and
+  builds the *remote's* copy, so a PR merged on GitHub ships without anyone
+  pulling. Don't fast-forward or touch the main checkout to deploy; its state
+  doesn't matter. A failed fetch fails the run (it never falls back to a stale
+  local branch). Local commits not on the remote are left out and reported as
+  a warning. Without `remote:` the local branch is built, and `--plan` warns
+  when it's behind its upstream (as of the last fetch).
 
 ## Deploy workflow
+
+The standard invocation, so there is nothing to decide each time:
+
+    j-cicd run <name> --plan            # review the commit, steps, deploy host
+    j-cicd run <name> --commit <rev> --json   # <rev> = the plan's revision
+
+`--commit` ties the run to what you reviewed: it builds exactly that commit
+(it must be in the release branch's history, and needs `branch:`), even if
+the branch has moved since the plan. Use `--json` rather than `--quiet`: the
+result object says whether it passed, what stage failed, the digests and
+whether it was deployed. A `verify:` stage already checks the live site, so
+don't add a curl of your own.
 
 1. `j-cicd run <name|dir> --plan` shows the commit, steps, images, deploy
    host and verify URLs without doing anything. Exit 1 means a PROBLEM
@@ -33,6 +52,14 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 4. Only one run per project at a time: starting another while one is going
    fails on the per-project lock. `j-cicd logs <name> -f` follows a live run;
    `cancel` stops it.
+
+## Catch failures before merging
+
+Lint, tests and the build run inside the deploy, so a failure found there is
+found late. Run the same steps first, on the branch you're about to merge:
+`j-cicd run <name> --no-push --no-deploy` builds everything (steps, images,
+artifacts) without pushing or deploying, so it checks the pipeline end to
+end. A pull-request check that runs the same steps is better still.
 
 ## Project kinds
 
@@ -83,6 +110,13 @@ More output, only if the tail isn't enough:
 
 `j-cicd rollback <name>` reverts the last deploy: images or files, never the
 database. It never happens automatically. Running it again undoes it.
+
+Because the database stays as it is, a release with a migration is not
+undone by a rollback: before rolling one back, look at the project's
+pre-deploy backup (the agent's `pre_deploy` command, e.g. a dump under
+`~/backups` on the VPS) and decide whether the old code can run against the
+migrated schema. Prove rollback works once on a quiet day, not first under
+pressure.
 
 ## Other commands
 

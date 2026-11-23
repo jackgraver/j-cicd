@@ -65,6 +65,7 @@ it against a second or third project just means writing another config.
 ```yaml
 name: my-project       # required
 branch: main           # optional release branch: build its latest commit, not the working tree
+remote: origin         # optional, with branch: fetch it and build the remote's copy, not the local branch
 timeout: 30m            # optional, default time limit per step/docker command
 steps:                 # optional list of shell commands, run in order
   - name: build
@@ -171,6 +172,17 @@ container to a commit. A tree with uncommitted changes is tagged
 `<rev>-dirty`, since j-cicd builds what's on disk rather than what's
 committed. Declaring `tags:` explicitly overrides all of this.
 
+**Release remote.** With `remote:` (needs `branch:`) a run first does
+`git fetch <remote> <branch>` and builds `<remote>/<branch>`, so a PR merged
+on the remote ships without anyone pulling; the local branch and checkout
+are never touched. A failed fetch (2 minute limit, no credential prompts)
+fails the run rather than building something stale. Local commits missing
+from the remote are a warning, being behind isn't. `--plan` fetches too, so
+the plan names the commit a run would build. `run --commit <rev>` pins a
+release run to one commit of the branch's history (what `--plan` printed),
+so a run can't build something other than what was reviewed; a commit
+outside the history is refused.
+
 **Release branch.** With `branch:` set, a run never builds the project
 directory as it is on disk. It resolves the local branch to its latest
 commit, checks that commit out as a detached `git worktree` at
@@ -251,7 +263,7 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
 - `j-cicd remove <name>` — unregister (history and files are kept).
 - `j-cicd list [--json]` — projects with their latest result.
 - `j-cicd run [name|project-dir] [--config path] [--no-push] [--no-deploy]
-  [--deploy-dirty] [--plan] [--json] [-v|--verbose] [--quiet]` —
+  [--deploy-dirty] [--commit rev] [--plan] [--json] [-v|--verbose] [--quiet]` —
   run a pipeline. A bare word that names a registered project runs it;
   anything path-like is a directory as before. A registered directory is
   recorded under its registered name. See **Output and agents** below for
@@ -358,10 +370,10 @@ output depends on who is reading:
   `--plan --json` is one object: `project`, `branch`, `revision`, `steps`,
   `images`, `deploy` (host, refs, `verify` URLs), `skipped`, `warnings`,
   `problems`, and `upstream`/`ahead`/`behind`.
-- **Local vs. origin**: j-cicd always builds the *local* branch (the
+- **Local vs. origin**: without `remote:`, j-cicd builds the *local* branch (the
   release `branch:`, or the checked-out one), and says so. If it's ahead of,
   behind, or diverged from its upstream (as of the last fetch; j-cicd never
-  touches the network for this) it warns, in the run, the plan and the
+  touches the network for this, except the fetch `remote:` asks for) it warns, in the run, the plan and the
   concise output. The plan always states
   the relationship: in sync, ahead/behind, or no upstream to compare with.
 

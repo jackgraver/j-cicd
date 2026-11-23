@@ -87,6 +87,8 @@ type runArgs struct {
 	deploy bool
 	// deployDirty allows deploying a build with uncommitted changes.
 	deployDirty bool
+	// commit pins a release-branch run to one commit.
+	commit string
 	// verbose streams all command output; json prints the result as JSON
 	// on stdout; plan only reports what would happen.
 	verbose, json, plan bool
@@ -103,13 +105,14 @@ func parseRunArgs(args []string) (runArgs, error) {
 	plan := fs.Bool("plan", false, "show what would run (commit, steps, images, deploy host) without running, building, pushing or deploying")
 	noDeploy := fs.Bool("no-deploy", false, "push images but skip the deploy: stage")
 	deployDirty := fs.Bool("deploy-dirty", false, "allow deploying a build of uncommitted changes")
+	commit := fs.String("commit", "", "build exactly this commit of the release branch (the revision `--plan` shows) instead of its latest; needs branch: in the config")
 
 	dir, err := parseCommandFlags(fs, args)
 	if err != nil {
 		return runArgs{}, err
 	}
 
-	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty,
+	parsed := runArgs{projectDir: dir, configPath: *configPath, push: !*noPush, quiet: *quiet, deploy: !*noDeploy, deployDirty: *deployDirty, commit: *commit,
 		verbose: *verbose, json: *asJSON, plan: *plan}
 	parsed.defaultPaths()
 	return parsed, nil
@@ -158,7 +161,7 @@ func cmdRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty}
+	opts := manager.Options{Push: parsed.push, Deploy: parsed.deploy, DeployDirty: parsed.deployDirty, Commit: parsed.commit}
 	if parsed.plan {
 		return cmdPlan(ctx, st, target, opts, parsed.json)
 	}

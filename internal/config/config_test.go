@@ -388,3 +388,19 @@ func TestLoadRejectsBadArtifacts(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRemote(t *testing.T) {
+	if cfg := loadOK(t, "name: app\nbranch: main\nremote: origin\nsteps:\n  - run: make\n", ""); cfg.Remote != "origin" {
+		t.Errorf("remote = %q", cfg.Remote)
+	}
+	cases := map[string]struct{ body, want string }{
+		"no branch": {"name: app\nremote: origin\nsteps:\n  - run: make\n", "remote: needs branch:"},
+		"dash":      {"name: app\nbranch: main\nremote: \"-x\"\nsteps:\n  - run: make\n", "not a valid remote name"},
+		"a url":     {"name: app\nbranch: main\nremote: \"https://x/y\"\nsteps:\n  - run: make\n", "not a valid remote name"},
+	}
+	for name, tc := range cases {
+		if got := loadErr(t, tc.body); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: error = %q, want %q", name, got, tc.want)
+		}
+	}
+}
