@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"text/tabwriter"
 	"time"
 
@@ -170,12 +171,18 @@ func cmdHistory(args []string) error {
 	limit := fs.Int("n", 20, "show at most this many runs (0 for all)")
 	fs.IntVar(limit, "limit", 20, "same as -n")
 	last := fs.Bool("last", false, "show only the most recent run (same as -n 1)")
+	checks := fs.Bool("checks", false, "include check runs, which are left out by default so the latest run is the latest release")
 	asJSON := fs.Bool("json", false, "print runs as a JSON array on stdout (newest first)")
-	pos, err := parseFlagsOnly(fs, args, "[name] [-n count | --limit count | --last] [--json]", 0, 1)
+	pos, err := parseFlagsOnly(fs, args, "[name] [-n count | --limit count | --last] [--checks] [--json]", 0, 1)
 	if err != nil {
 		return err
 	}
 	if *last {
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == "n" || f.Name == "limit" })
+		if set {
+			return usageError(errors.New("--last can't be combined with -n or --limit"))
+		}
 		*limit = 1
 	}
 	st, err := openStore()
@@ -186,9 +193,15 @@ func cmdHistory(args []string) error {
 	if len(pos) == 1 {
 		project = pos[0]
 	}
-	runs, err := st.Runs(project, *limit)
+	runs, err := st.Runs(project, 0)
 	if err != nil {
 		return err
+	}
+	if !*checks {
+		runs = slices.DeleteFunc(runs, func(r store.Run) bool { return r.Kind == store.KindCheck })
+	}
+	if *limit > 0 && len(runs) > *limit {
+		runs = runs[:*limit]
 	}
 	if *asJSON {
 		return printJSON(toJSONRuns(runs))
@@ -210,18 +223,25 @@ func cmdHistory(args []string) error {
 	return tw.Flush()
 }
 
-// findRun resolves a run ID, or a project name meaning its latest run.
+// findRun resolves a run ID, or a project name meaning its latest run (not
+// counting checks, unless it has only checks).
 func findRun(st *store.Store, ref string) (store.Run, error) {
 	r, err := st.GetRun(ref)
 	if !errors.Is(err, store.ErrNotFound) {
 		return r, err
 	}
-	runs, err := st.Runs(ref, 1)
+	runs, err := st.Runs(ref, 0)
 	if err != nil {
 		return store.Run{}, err
 	}
 	if len(runs) == 0 {
 		return store.Run{}, fmt.Errorf("no run or project with recorded runs named %q (see j-cicd history)", ref)
+	}
+	// A name means the latest release run; a check is reached by its id.
+	for _, r := range runs {
+		if r.Kind != store.KindCheck {
+			return r, nil
+		}
 	}
 	return runs[0], nil
 }

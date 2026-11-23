@@ -34,6 +34,11 @@ func (s Status) Done() bool { return s != StatusRunning }
 // can't be allowed to grow without bound.
 const DefaultKeepRuns = 50
 
+// DefaultKeepChecks is how many finished check runs per project are kept.
+// They are counted apart from the other runs so a busy feature branch can't
+// prune the deploy history.
+const DefaultKeepChecks = 10
+
 // KindRollback marks a run that reverted the project's last deploy
 // instead of running its pipeline.
 const KindRollback = "rollback"
@@ -281,6 +286,9 @@ func (s *Store) LastRuns() (map[string]Run, error) {
 	}
 	last := make(map[string]Run)
 	for _, r := range runs {
+		if r.Kind == KindCheck {
+			continue // a passing check must not hide a failed deploy
+		}
 		if _, seen := last[r.Project]; !seen {
 			last[r.Project] = r
 		}
@@ -309,13 +317,20 @@ func (s *Store) prune(project string, keep int) error {
 	if err != nil {
 		return err
 	}
-	finished := 0
+	finished, checks := 0, 0
 	for _, r := range runs {
 		if !r.Status.Done() {
 			continue
 		}
-		finished++
-		if finished > keep {
+		over := false
+		if r.Kind == KindCheck {
+			checks++
+			over = checks > DefaultKeepChecks
+		} else {
+			finished++
+			over = finished > keep
+		}
+		if over {
 			if err := os.RemoveAll(s.runDir(r.ID)); err != nil {
 				return err
 			}

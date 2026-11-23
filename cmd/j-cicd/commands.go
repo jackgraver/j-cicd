@@ -265,7 +265,7 @@ func cmdDeploy(args []string) error {
 	}
 	if len(plan.Problems) > 0 {
 		log.Print(plan.Describe())
-		return jsonFail(fmt.Errorf("this deploy would fail: %s", strings.Join(plan.Problems, "; ")), target.Name, machine)
+		return jsonFail(fmt.Errorf("%w: this deploy would fail: %s (--deploy-dirty overrides a dirty tree)", errRefused, strings.Join(plan.Problems, "; ")), target.Name, machine)
 	}
 	if !parsed.quiet {
 		log.Print(plan.Summary())

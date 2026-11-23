@@ -59,7 +59,13 @@ const (
 	errKindNotFound = "not_found"
 	errKindBusy     = "busy"
 	errKindInternal = "internal"
+	// errKindRefused is a run j-cicd would not start (a dirty tree, no
+	// per-commit tag): fix what the message names, don't report a bug.
+	errKindRefused = "refused"
 )
+
+// errRefused wraps the reason a plan says a run would be refused.
+var errRefused = errors.New("refused")
 
 // jsonError is what a command prints under --json when no run was
 // recorded, so there is always exactly one object to parse.
@@ -96,6 +102,11 @@ func toJSONError(err error, project string) jsonError {
 		e.ErrorKind = errKindBusy
 		if project != "" {
 			e.Next = []string{"j-cicd logs " + project + " -f", "j-cicd cancel " + project}
+		}
+	case errors.Is(err, errRefused):
+		e.ErrorKind = errKindRefused
+		if project != "" {
+			e.Next = []string{"j-cicd run " + project + " --plan"}
 		}
 	case errors.Is(err, errNoProject):
 		e.ErrorKind = errKindNotFound
@@ -167,6 +178,8 @@ func briefLine(r store.Run) string {
 		words = append(words, "deployed")
 	case len(r.Images) > 0:
 		words = append(words, "pushed")
+	case len(r.Artifacts) > 0:
+		words = append(words, "hashed")
 	default:
 		words = append(words, "built")
 	}

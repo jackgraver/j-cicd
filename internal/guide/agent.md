@@ -50,8 +50,11 @@ there is nothing to decide each time (without `branch:`, drop `--commit`):
 When the user has already said to deploy, do both in one call:
 `j-cicd deploy <name> [--brief|--json]` resolves the plan once, prints its key
 lines (commit, images or files, host) to stderr, and runs pinned to that
-commit. It is as safe as the two steps; use `run --plan` when you need to
-ask the user in between.
+commit. That pin needs `branch:` in the config; without it the run builds the
+working tree as it is when it starts, so a commit made in between would ship
+(`--plan` says which applies). Use `run --plan` when you need to ask the user
+in between. A plan problem (dirty tree, no per-commit tag) is reported as
+`error_kind: "refused"`: fix what it names.
 
 `--brief` (on `run`, `deploy`, `rollback`, `check`) keeps the output small: one
 stdout line when the run passes, e.g. `ok simple-track 7b2eed0ec256 deployed
@@ -119,10 +122,13 @@ history as a `check` run, and takes `--brief`, `--json` and `-v` like `run`.
 - `next` has ready-to-run commands (the failing stage's log, a rollback if
   something is already deployed).
 - With no run recorded (unknown project, bad flag, busy project) the object is
-  `{"status":"error","error_kind":"usage|config|not_found|busy|internal",
+  `{"status":"error","error_kind":"usage|config|not_found|busy|refused|internal",
   "error":...,"exit_code":N}`.
 - `history --json` has the same `failure` and `stages` for earlier runs;
-  `history <name> --last` (or `--limit N`) keeps it to the latest.
+  `history <name> --last` (or `--limit N`) keeps it to the latest. `check`
+  runs are left out of `history`, `list`, the dashboard and `logs <name>` so
+  the latest run is the latest release; `history --checks` includes them and
+  `logs <run-id>` reads one.
 
 More output, only if the tail isn't enough:
 

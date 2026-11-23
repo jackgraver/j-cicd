@@ -270,9 +270,11 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   `--plan`, `--json`, `-v` and `--quiet`.
 - `j-cicd deploy [name|project-dir] [run's flags]` — `run --plan` and
   `run --commit <planned rev>` in one call: resolves the plan once, prints
-  its key lines to stderr, then runs pinned to that commit. Refuses `--plan`,
-  `--commit`, `--no-push` and `--no-deploy`; a project without `deploy:` is a
-  usage error.
+  its key lines to stderr, then runs pinned to that commit (only with
+  `branch:`; without it the run builds the working tree as it is then).
+  Refuses `--plan`, `--commit`, `--no-push` and `--no-deploy`; a project
+  without `deploy:` is a usage error, and plan problems are `error_kind:
+  "refused"` with exit 1.
 - `j-cicd check [name|project-dir] [--ref commit-ish] [--config path] [--json]
   [--brief] [-v] [--quiet]` — run only the `steps:` (no docker check, images,
   artifacts or deploy), so "will this pass?" reads the same config as the
@@ -280,7 +282,10 @@ otherwise `dev`. Go only stamps that from a regular checkout — builds from a
   project lock; with it, a clean throwaway worktree of that commit with the
   config committed there (no lock), so a feature branch can be checked while
   `branch:` names the release branch. Recorded as a run of kind `check`
-  (`manager.Check`, `pipeline.Options.StepsOnly`).
+  (`manager.Check`, `pipeline.Options.StepsOnly`); checks don't count as a
+  project's latest run (`list`, dashboard, `logs <name>`, `history` unless
+  `--checks`, busy detection) and are pruned apart from the other runs (10
+  kept).
 - `--brief` (`run`, `deploy`, `rollback`, `check`) — stdout is one line on
   success (`ok <project> <rev> deployed verified 43s`) and, on failure, only a
   failure object (`status`, `id`, `failure`, `exit_code`, `next`, no stages).
@@ -374,7 +379,7 @@ output depends on who is reading:
   commands: the failing stage's log, a rollback when something is already
   deployed) — even when the run failed. When no run was recorded (unknown
   project, bad flag, busy project, config that won't load) it is still one
-  object, `{"status":"error","error_kind":"usage|config|not_found|busy|
+  object, `{"status":"error","error_kind":"usage|config|not_found|busy|refused|
   internal","error":...,"exit_code":N,"next":[...]}`; `--plan` errors too.
   Stdout carries only data; prose and progress always go to stderr.
 - **Exit status**: 0 ok, 1 failed or cancelled, 2 usage, 3 config. It is

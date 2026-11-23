@@ -3,8 +3,10 @@ package manager
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"j-cicd/internal/config"
 	"j-cicd/internal/detect"
@@ -55,9 +57,11 @@ func Check(ctx context.Context, st *store.Store, t Target, ref string, opts Opti
 		if rel == nil {
 			return prepareAndExecute(ctx, st.Root(), t.Name, dir, configPath, revision, nil, opts, env)
 		}
-		// A distinct snapshot dir: a check of a ref holds no lock, so it
-		// must not collide with a release run's snapshot.
-		snapDir := filepath.Join(st.Root(), "snapshots", t.Name+"-check-"+rel.revision)
+		// A check of a ref holds no lock, so its snapshot is unique per run:
+		// it can't collide with a release run's, and two checks of one
+		// commit can't remove each other's checkout (createSnapshot clears
+		// whatever it finds).
+		snapDir := filepath.Join(st.Root(), "snapshots", fmt.Sprintf("%s-check-%d-%d", t.Name, os.Getpid(), time.Now().UnixNano()))
 		prep, err := prepareRef(ctx, snapDir, dir, configPath, rel, env)
 		if err != nil {
 			return err
