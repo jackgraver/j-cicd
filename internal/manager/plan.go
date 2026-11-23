@@ -30,7 +30,9 @@ type Plan struct {
 	Busy string `json:"busy_run,omitempty"`
 	// Upstream is what the built branch tracks ("" if nothing), and
 	// Ahead/Behind how many commits it differs by, as of the last fetch.
-	// j-cicd builds the local branch whatever these say.
+	// Without a remote j-cicd builds the local branch whatever these say.
+	// With one it builds the remote's copy: Upstream is that copy, Ahead is
+	// local commits left out of the build, and Behind is always omitted.
 	Upstream string `json:"upstream,omitempty"`
 	Ahead    int    `json:"ahead,omitempty"`
 	Behind   int    `json:"behind,omitempty"`
@@ -147,7 +149,12 @@ func MakePlan(ctx context.Context, st *store.Store, t Target, opts Options) (*Pl
 	plan.Dirty = rel == nil && strings.HasSuffix(plan.Revision, "-dirty")
 	if s, ok := releaseSync(ctx, dir, rel); ok {
 		plan.Upstream, plan.Ahead, plan.Behind = s.Upstream, s.Ahead, s.Behind
-		if note := syncWarning(ctx, dir, rel); note != "" {
+		if rel != nil && rel.remote != "" {
+			// The build is the remote's copy, so the local branch being
+			// behind it says nothing about staleness; only ahead matters.
+			plan.Behind = 0
+		}
+		if note := syncNote(rel, s); note != "" {
 			plan.Warnings = append(plan.Warnings, note)
 		}
 	}

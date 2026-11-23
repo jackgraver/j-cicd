@@ -369,7 +369,9 @@ output depends on who is reading:
   no per-commit tag) lists a PROBLEM and exits 1.
   `--plan --json` is one object: `project`, `branch`, `revision`, `steps`,
   `images`, `deploy` (host, refs, `verify` URLs), `skipped`, `warnings`,
-  `problems`, and `upstream`/`ahead`/`behind`.
+  `problems`, `remote` (when `remote:` is set) and `upstream`/`ahead`/
+  `behind` (with `remote:`, `ahead` counts unpushed local commits left out
+  of the build and `behind` is omitted).
 - **Local vs. origin**: without `remote:`, j-cicd builds the *local* branch (the
   release `branch:`, or the checked-out one), and says so. If it's ahead of,
   behind, or diverged from its upstream (as of the last fetch; j-cicd never

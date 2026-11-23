@@ -27,7 +27,8 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 
 ## Deploy workflow
 
-The standard invocation, so there is nothing to decide each time:
+The standard invocation for a release-branch project (`branch:` set), so
+there is nothing to decide each time (without `branch:`, drop `--commit`):
 
     j-cicd run <name> --plan            # review the commit, steps, deploy host
     j-cicd run <name> --commit <rev> --json   # <rev> = the plan's revision
@@ -56,10 +57,13 @@ don't add a curl of your own.
 ## Catch failures before merging
 
 Lint, tests and the build run inside the deploy, so a failure found there is
-found late. Run the same steps first, on the branch you're about to merge:
-`j-cicd run <name> --no-push --no-deploy` builds everything (steps, images,
-artifacts) without pushing or deploying, so it checks the pipeline end to
-end. A pull-request check that runs the same steps is better still.
+found late. Run the same steps before merging. For a project without
+`branch:`, `j-cicd run <name> --no-push --no-deploy` builds the working tree
+(steps, images, artifacts) without pushing or deploying, so it checks the
+pipeline end to end. With `branch:` set it builds the release branch, not
+your feature branch, so it can't check a PR; run the project's own check
+command (steps from `.cicd.yaml`) on the PR branch, or add a pull-request CI
+check that runs the same steps.
 
 ## Project kinds
 
@@ -113,8 +117,8 @@ database. It never happens automatically. Running it again undoes it.
 
 Because the database stays as it is, a release with a migration is not
 undone by a rollback: before rolling one back, look at the project's
-pre-deploy backup (the agent's `pre_deploy` command, e.g. a dump under
-`~/backups` on the VPS) and decide whether the old code can run against the
+pre-deploy backup (the agent's `pre_deploy` command, e.g. a database dump
+on the VPS) and decide whether the old code can run against the
 migrated schema. Prove rollback works once on a quiet day, not first under
 pressure.
 

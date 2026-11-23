@@ -160,7 +160,7 @@ func (c *Config) applyDefaults(revision string) error {
 		if c.Branch == "" {
 			return errors.New("remote: needs branch: (the branch to fetch from it)")
 		}
-		if strings.HasPrefix(c.Remote, "-") || strings.ContainsAny(c.Remote, " \t\n/:") {
+		if strings.HasPrefix(c.Remote, "-") || strings.ContainsAny(c.Remote, " \t\n:") {
 			return fmt.Errorf("remote %q is not a valid remote name", c.Remote)
 		}
 	}

@@ -79,7 +79,8 @@ func TestRemoteWarnsAboutUnpushedCommits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "1 commit not on origin/main (unpushed)") {
+	// (origin's committed config lacks remote:, which warns as well.)
+	if len(plan.Warnings) == 0 || !strings.Contains(plan.Warnings[0], "1 commit not on origin/main (unpushed)") {
 		t.Errorf("warnings = %q", plan.Warnings)
 	}
 	if plan.Remote != "origin" || !strings.Contains(plan.Describe(), "origin/main at "+plan.Revision+" (fetched just now)") {
@@ -97,8 +98,8 @@ func TestRemoteBehindIsNotAWarning(t *testing.T) {
 	if len(plan.Warnings) != 0 {
 		t.Errorf("warnings = %q, want none: being behind is why the remote is built", plan.Warnings)
 	}
-	if plan.Behind != 1 {
-		t.Errorf("behind = %d, want 1", plan.Behind)
+	if plan.Behind != 0 || plan.Upstream != "origin/main" {
+		t.Errorf("upstream = %q behind = %d, want origin/main and no behind", plan.Upstream, plan.Behind)
 	}
 }
 
@@ -128,7 +129,7 @@ func TestRemoteBranchMissingOnRemote(t *testing.T) {
 	st, target, _, _ := remoteRepo(t)
 	write(t, target.ConfigPath, strings.Replace(remoteConfig, "branch: main", "branch: prod", 1))
 	_, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
-	if err == nil || !strings.Contains(err.Error(), "fetching origin/prod") {
+	if err == nil || !strings.Contains(err.Error(), `release branch "prod" doesn't exist on remote "origin"`) {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -190,5 +191,46 @@ func TestCommitNeedsReleaseBranch(t *testing.T) {
 	}
 	if len(plan.Problems) != 1 || !strings.Contains(plan.Problems[0], "--commit needs branch:") {
 		t.Errorf("problems = %q", plan.Problems)
+	}
+}
+
+func TestCommitWithLocalBranchAndRefNames(t *testing.T) {
+	st, target, mainRev := releaseRepo(t)
+	gitT(t, target.Dir, "checkout", "-q", "main")
+	write(t, filepath.Join(target.Dir, "two.txt"), "second\n")
+	gitT(t, target.Dir, "add", "two.txt")
+	gitT(t, target.Dir, "commit", "-q", "-m", "two")
+	write(t, target.ConfigPath, releaseConfig)
+
+	// A short sha and a ref name both pin to the first commit.
+	for _, pin := range []string{mainRev[:7], "HEAD~1"} {
+		run, err := Run(context.Background(), st, target, Options{Commit: pin, Runner: &recordingRunner{}})
+		if err != nil {
+			t.Fatalf("--commit %s: %v", pin, err)
+		}
+		if run.Revision != mainRev {
+			t.Errorf("--commit %s: revision = %s, want %s", pin, run.Revision, mainRev)
+		}
+	}
+	// Without --commit the plan still prints how to pin.
+	plan, err := MakePlan(context.Background(), st, target, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Describe(), "pin:     j-cicd run app --commit "+plan.Revision) {
+		t.Errorf("plan = %q", plan.Describe())
+	}
+}
+
+func TestRemoteOnlyInWorkingConfigWarns(t *testing.T) {
+	st, target, _, _ := remoteRepo(t)
+	// origin/main's committed config has no remote:, only the working copy does.
+	run, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := os.ReadFile(st.LogPath(run.ID))
+	if !strings.Contains(string(log), `doesn't say remote: "origin"`) {
+		t.Errorf("no warning about the uncommitted remote: setting:\n%s", log)
 	}
 }

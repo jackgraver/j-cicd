@@ -58,15 +58,18 @@ func resolveRelease(ctx context.Context, dir, branch, remote, pin string) (*rele
 		ref = "refs/remotes/" + remote + "/" + branch
 		fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
-		if _, err := git(fctx, dir, "fetch", "--quiet", "--no-tags", remote, "+refs/heads/"+branch+":"+ref); err != nil {
+		if _, err := git(ctx, dir, "check-ref-format", ref); err != nil {
+			return nil, fmt.Errorf("branch %q with remote %q is not a valid ref name", branch, remote)
+		}
+		if _, err := gitWith(fctx, dir, fetchEnv(ctx, dir), "fetch", "--quiet", "--no-tags", remote, "+refs/heads/"+branch+":"+ref); err != nil {
+			if strings.Contains(err.Error(), "couldn't find remote ref") {
+				return nil, fmt.Errorf("release branch %q doesn't exist on remote %q: fix branch: in the config", branch, remote)
+			}
 			return nil, fmt.Errorf("fetching %s/%s: %w (remove remote: from the config to build the local branch instead)", remote, branch, err)
 		}
 	}
 	commit, err := git(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	if err != nil {
-		if remote != "" {
-			return nil, fmt.Errorf("release branch %q doesn't exist on remote %q", branch, remote)
-		}
 		return nil, fmt.Errorf("release branch %q doesn't exist in %s: create it, or change branch: in the config", branch, dir)
 	}
 	if pin != "" {
@@ -144,12 +147,32 @@ func (s *snapshot) remove() error {
 	return nil
 }
 
+// fetchEnv makes a fetch fail rather than wait for a person: no credential
+// prompt, and ssh in batch mode (no passphrase or host-key question) with a
+// connect timeout. An ssh command the user configured is left alone.
+func fetchEnv(ctx context.Context, dir string) []string {
+	if os.Getenv("GIT_SSH_COMMAND") != "" || os.Getenv("GIT_SSH") != "" {
+		return nil
+	}
+	if out, _ := git(ctx, dir, "config", "--get", "core.sshCommand"); out != "" {
+		return nil
+	}
+	return []string{"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=30"}
+}
+
 // git runs a git command in dir and returns its trimmed stdout, with
 // stderr folded into the error.
 func git(ctx context.Context, dir string, args ...string) (string, error) {
+	return gitWith(ctx, dir, nil, args...)
+}
+
+// gitWith is git with extra environment variables.
+func gitWith(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	// A fetch must fail, not wait on a credentials prompt nobody can see.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Never wait on a credentials prompt nobody can see.
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), env...)
+	// A child (ssh) that outlives a cancelled git must not hold Output open.
+	cmd.WaitDelay = 5 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -173,6 +196,11 @@ func syncWarning(ctx context.Context, dir string, rel *release) string {
 	if !ok {
 		return ""
 	}
+	return syncNote(rel, s)
+}
+
+// syncNote is the warning for a sync status ("" if there is nothing to say).
+func syncNote(rel *release, s syncStatus) string {
 	if rel != nil && rel.remote != "" {
 		return formatRemoteSync(rel.branch, s.Upstream, s.Ahead)
 	}

@@ -443,6 +443,9 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 	if cfg.Branch != rel.branch {
 		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
 	}
+	if cfg.Remote != rel.remote {
+		env.warnf("the config committed on %s doesn't say remote: %q (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.remote)
+	}
 	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil
 }
 
