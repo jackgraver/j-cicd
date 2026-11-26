@@ -20,6 +20,10 @@ import (
 // directory when --config isn't given explicitly.
 const DefaultFile = ".cicd.yaml"
 
+// RemoteNone as remote: builds the local release branch even when it
+// tracks a remote.
+const RemoteNone = "none"
+
 // Config describes the pipeline for a single project. Every project that
 // wants to use j-cicd provides its own one of these — nothing here is
 // specific to any particular project.
@@ -32,7 +36,9 @@ type Config struct {
 	Branch string `yaml:"branch,omitempty"`
 	// Remote, with branch: set, makes a run fetch that branch from this git
 	// remote and build the remote's copy rather than the local branch, so
-	// a PR merged there ships without anyone pulling first.
+	// a PR merged there ships without anyone pulling first. Unset, it is
+	// the remote the local branch tracks (if any); RemoteNone builds the
+	// local branch.
 	Remote string `yaml:"remote,omitempty"`
 	// Timeout is the default time limit for each individual step and
 	// docker command. Unset means the runner's built-in default; an
@@ -158,7 +164,7 @@ func (c *Config) applyDefaults(revision string) error {
 	}
 	if c.Remote != "" {
 		if c.Branch == "" {
-			return errors.New("remote: needs branch: (the branch to fetch from it)")
+			return errors.New("remote: needs branch: (the branch to fetch from it, or to build locally with remote: none)")
 		}
 		if strings.HasPrefix(c.Remote, "-") || strings.ContainsAny(c.Remote, " \t\n:") {
 			return fmt.Errorf("remote %q is not a valid remote name", c.Remote)

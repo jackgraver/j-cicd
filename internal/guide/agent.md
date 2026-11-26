@@ -17,7 +17,8 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
 - `--brief` prints one line on success (`ok <name> <rev> deployed verified
   43s`) and only the failure object on failure. Read `failure.tail` first.
 - Failures, `logs`, `history --last`: see "When a run fails". Undo: `rollback`.
-- Never build images by hand or ssh to the VPS to deploy.
+- Never build images by hand or ssh to the VPS to deploy, and never pull or
+  merge the local checkout to deploy: a release builds the remote's branch.
 
 ## Rules
 
@@ -31,13 +32,15 @@ asking the tool over trusting remembered details: `j-cicd run --plan`,
   changes are left out (and don't block), so commit what should ship. Without
   `branch:` it builds the working tree, and a dirty tree is refused for a
   deploy (`--deploy-dirty` overrides). `--plan` states which applies.
-- With `remote: origin` next to `branch:`, a run first fetches that branch and
-  builds the *remote's* copy, so a PR merged on GitHub ships without anyone
-  pulling. Don't fast-forward or touch the main checkout to deploy; its state
-  doesn't matter. A failed fetch fails the run (it never falls back to a stale
-  local branch). Local commits not on the remote are left out and reported as
-  a warning. Without `remote:` the local branch is built, and `--plan` warns
-  when it's behind its upstream (as of the last fetch).
+- With `branch:` set, a run builds the *remote's* copy of the branch: it
+  fetches the branch from `remote:` (default: the remote the local branch
+  tracks, normally `origin`) and builds that, so a PR merged on GitHub ships
+  without anyone pulling. Never pull, merge, rebase or fast-forward the main
+  checkout to deploy; its state doesn't matter. A failed fetch fails the run
+  (it never falls back to a stale local branch). Local commits not on the
+  remote are left out and reported as a warning: push and merge them to
+  ship them. Only a branch that tracks nothing, or `remote: none`, builds
+  the local branch, and then `--plan` warns when it's behind its upstream.
 
 ## Deploy workflow
 

@@ -10,15 +10,20 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"j-cicd/internal/config"
 )
 
 // release is the commit a run with a release branch builds: config's
 // branch: resolved in the project's repository when the run starts.
 type release struct {
 	branch string
-	// remote is config's remote: ("" builds the local branch). When set the
-	// run fetched the branch from it and builds the remote-tracking copy.
-	remote   string
+	// remote is the remote the branch was fetched from ("" builds the local
+	// branch): config's remote:, else the one the local branch tracks.
+	remote string
+	// setting is config's remote: as written ("" when it was defaulted),
+	// to compare with the config committed on the branch.
+	setting  string
 	commit   string // full SHA
 	revision string // short SHA, the per-commit image tag
 	// prefix is the project directory's path inside its repository ("" at
@@ -48,11 +53,12 @@ const fetchTimeout = 2 * time.Minute
 // a failed fetch fails the run rather than building something stale.
 // A non-empty pin builds that commit instead of the tip, provided it is
 // part of the release branch's history.
-func resolveRelease(ctx context.Context, dir, branch, remote, pin string) (*release, error) {
+func resolveRelease(ctx context.Context, dir, branch, setting, pin string) (*release, error) {
 	prefix, err := git(ctx, dir, "rev-parse", "--show-prefix")
 	if err != nil {
 		return nil, fmt.Errorf("branch: %s is set, but %s is not in a git repository", branch, dir)
 	}
+	remote := releaseRemote(ctx, dir, branch, setting)
 	ref := "refs/heads/" + branch
 	if remote != "" {
 		ref = "refs/remotes/" + remote + "/" + branch
@@ -65,7 +71,7 @@ func resolveRelease(ctx context.Context, dir, branch, remote, pin string) (*rele
 			if strings.Contains(err.Error(), "couldn't find remote ref") {
 				return nil, fmt.Errorf("release branch %q doesn't exist on remote %q: fix branch: in the config", branch, remote)
 			}
-			return nil, fmt.Errorf("fetching %s/%s: %w (remove remote: from the config to build the local branch instead)", remote, branch, err)
+			return nil, fmt.Errorf("fetching %s/%s: %w (set remote: none in the config to build the local branch instead)", remote, branch, err)
 		}
 	}
 	commit, err := git(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
@@ -89,7 +95,26 @@ func resolveRelease(ctx context.Context, dir, branch, remote, pin string) (*rele
 	if err != nil {
 		return nil, err
 	}
-	return &release{branch: branch, remote: remote, commit: commit, revision: revision, prefix: strings.TrimSuffix(prefix, "/")}, nil
+	return &release{branch: branch, remote: remote, setting: setting, commit: commit, revision: revision, prefix: strings.TrimSuffix(prefix, "/")}, nil
+}
+
+// releaseRemote is the remote a release branch is built from: config's
+// remote: if set (RemoteNone meaning none), else the remote the local branch
+// tracks, so a project whose PRs merge on GitHub releases what was merged
+// there rather than whatever the local branch happens to hold. A branch
+// tracking nothing, or another local branch, builds locally.
+func releaseRemote(ctx context.Context, dir, branch, setting string) string {
+	switch setting {
+	case config.RemoteNone:
+		return ""
+	case "":
+		remote, _ := git(ctx, dir, "config", "--get", "branch."+branch+".remote")
+		if remote == "." {
+			return ""
+		}
+		return remote
+	}
+	return setting
 }
 
 // snapshot is a detached git worktree of a release commit that a run

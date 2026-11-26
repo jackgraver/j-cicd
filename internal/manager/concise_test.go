@@ -125,9 +125,10 @@ func TestUnpushedReleaseCommitWarns(t *testing.T) {
 	gitT(t, target.Dir, "remote", "add", "origin", origin)
 	gitT(t, target.Dir, "push", "-q", "origin", "main")
 	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	buildLocalBranch(t, target)
 	gitT(t, target.Dir, "checkout", "-q", "main")
 	write(t, filepath.Join(target.Dir, "more.txt"), "unpushed\n")
-	gitT(t, target.Dir, "add", "more.txt")
+	gitT(t, target.Dir, "add", "more.txt", ".cicd.yaml")
 	gitT(t, target.Dir, "commit", "-q", "-m", "unpushed")
 
 	run, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
@@ -245,6 +246,7 @@ func TestPlanSyncFields(t *testing.T) {
 	gitT(t, target.Dir, "remote", "add", "origin", origin)
 	gitT(t, target.Dir, "push", "-q", "origin", "main")
 	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	buildLocalBranch(t, target)
 	plan, _ = MakePlan(context.Background(), st, target, Options{})
 	if plan.Upstream != "origin/main" || plan.Ahead != 0 || !strings.Contains(plan.Describe(), "in sync with origin/main") {
 		t.Errorf("in-sync plan:\n%s", plan.Describe())
@@ -253,7 +255,7 @@ func TestPlanSyncFields(t *testing.T) {
 	// One unpushed commit on main.
 	gitT(t, target.Dir, "checkout", "-q", "main")
 	write(t, filepath.Join(target.Dir, "more.txt"), "x\n")
-	gitT(t, target.Dir, "add", "more.txt")
+	gitT(t, target.Dir, "add", "more.txt", ".cicd.yaml")
 	gitT(t, target.Dir, "commit", "-q", "-m", "unpushed")
 	plan, _ = MakePlan(context.Background(), st, target, Options{})
 	if plan.Ahead != 1 || plan.Behind != 0 || len(plan.Warnings) != 1 {

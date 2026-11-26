@@ -442,6 +442,9 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 		configPath = filepath.Join(buildDir, inside)
 		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 			cleanup()
+			if rel.remote != "" {
+				return nil, &ConfigError{Err: fmt.Errorf("%s/%s at %s has no %s: push it to %s (if it's only committed locally) or set remote: none to build the local branch", rel.remote, rel.branch, rel.revision, inside, rel.remote)}
+			}
 			return nil, &ConfigError{Err: fmt.Errorf("%s at %s has no %s: commit it to %s", rel.branch, rel.revision, inside, rel.branch)}
 		}
 	}
@@ -453,8 +456,8 @@ func prepare(ctx context.Context, snapDir, dir, configPath, revision string, rel
 	if cfg.Branch != rel.branch {
 		env.warnf("the config committed on %s doesn't say branch: %s (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.branch)
 	}
-	if cfg.Remote != rel.remote {
-		env.warnf("the config committed on %s doesn't say remote: %q (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.remote)
+	if cfg.Remote != rel.setting {
+		env.warnf("the config committed on %s doesn't say remote: %q (only your working copy does) — commit it so the setting is part of the project", rel.branch, rel.setting)
 	}
 	return &prepared{dir: buildDir, cfg: cfg, cleanup: cleanup}, nil
 }
