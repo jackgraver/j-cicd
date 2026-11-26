@@ -25,6 +25,17 @@ func remoteRepo(t *testing.T) (st *store.Store, target Target, origin, mainRev s
 	return st, target, origin, mainRev
 }
 
+// buildLocalBranch sets remote: none in target's working config, so a
+// release branch that tracks a remote is still built from the local copy.
+func buildLocalBranch(t *testing.T, target Target) {
+	t.Helper()
+	data, err := os.ReadFile(target.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, target.ConfigPath, strings.Replace(string(data), "branch: main\n", "branch: main\nremote: none\n", 1))
+}
+
 // mergeOnOrigin advances origin's main the way a merged PR does, from a
 // separate clone, so the project's own repo isn't touched.
 func mergeOnOrigin(t *testing.T, origin string) (rev string) {
@@ -232,5 +243,86 @@ func TestRemoteOnlyInWorkingConfigWarns(t *testing.T) {
 	log, _ := os.ReadFile(st.LogPath(run.ID))
 	if !strings.Contains(string(log), `doesn't say remote: "origin"`) {
 		t.Errorf("no warning about the uncommitted remote: setting:\n%s", log)
+	}
+}
+
+// Without remote:, a release branch that tracks a remote is built from the
+// remote's copy, so a PR merged on GitHub ships without pulling and local
+// commits that were never pushed don't.
+func TestReleaseDefaultsToTrackedRemote(t *testing.T) {
+	st, target, origin, mainRev := remoteRepo(t)
+	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	write(t, target.ConfigPath, releaseConfig)
+	mergedRev := mergeOnOrigin(t, origin)
+
+	plan, err := MakePlan(context.Background(), st, target, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Remote != "origin" || plan.Revision != mergedRev {
+		t.Errorf("plan remote %q revision %s, want origin at %s", plan.Remote, plan.Revision, mergedRev)
+	}
+	run, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Revision != mergedRev || run.Revision == mainRev {
+		t.Errorf("revision = %s, want origin's %s (local main is %s)", run.Revision, mergedRev, mainRev)
+	}
+}
+
+// A branch that tracks nothing has no remote to default to: it builds
+// locally, as before.
+func TestReleaseWithoutUpstreamBuildsLocally(t *testing.T) {
+	st, target, _, mainRev := remoteRepo(t)
+	write(t, target.ConfigPath, releaseConfig)
+	run, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Revision != mainRev {
+		t.Errorf("revision = %s, want local main %s", run.Revision, mainRev)
+	}
+}
+
+// remote: none builds the local branch even though it tracks origin, and
+// doesn't fetch.
+func TestRemoteNoneBuildsLocalBranch(t *testing.T) {
+	st, target, origin, mainRev := remoteRepo(t)
+	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	write(t, target.ConfigPath, releaseConfig)
+	buildLocalBranch(t, target)
+	mergeOnOrigin(t, origin)
+
+	plan, err := MakePlan(context.Background(), st, target, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Remote != "" || plan.Revision != mainRev {
+		t.Errorf("plan remote %q revision %s, want local main %s", plan.Remote, plan.Revision, mainRev)
+	}
+	// Nothing was fetched, so origin/main is still where the push left it.
+	if got := gitT(t, target.Dir, "rev-parse", "--short=12", "origin/main"); got != mainRev {
+		t.Errorf("origin/main = %s, want it unfetched at %s", got, mainRev)
+	}
+}
+
+// A config committed only locally isn't on the remote a release builds, and
+// the error says so rather than asking for a commit that already exists.
+func TestRemoteReleaseWithoutConfigOnRemote(t *testing.T) {
+	st, target, origin, _ := remoteRepo(t)
+	gitT(t, target.Dir, "branch", "-q", "--set-upstream-to=origin/main", "main")
+	write(t, target.ConfigPath, releaseConfig)
+	other := filepath.Join(t.TempDir(), "other")
+	gitT(t, filepath.Dir(other), "clone", "-q", "-b", "main", origin, other)
+	gitT(t, other, "config", "user.email", "dev@example.com")
+	gitT(t, other, "config", "user.name", "dev")
+	gitT(t, other, "rm", "-q", ".cicd.yaml")
+	gitT(t, other, "commit", "-q", "-m", "drop config")
+	gitT(t, other, "push", "-q", "origin", "main")
+
+	_, err := Run(context.Background(), st, target, Options{Runner: &recordingRunner{}})
+	if err == nil || !strings.Contains(err.Error(), "origin/main at") || !strings.Contains(err.Error(), "push it to origin") {
+		t.Errorf("err = %v, want it to name origin/main and say to push", err)
 	}
 }

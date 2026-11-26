@@ -65,7 +65,7 @@ it against a second or third project just means writing another config.
 ```yaml
 name: my-project       # required
 branch: main           # optional release branch: build its latest commit, not the working tree
-remote: origin         # optional, with branch: fetch it and build the remote's copy, not the local branch
+remote: origin         # optional, with branch: the remote to build it from (default: the one it tracks; none = local)
 timeout: 30m            # optional, default time limit per step/docker command
 steps:                 # optional list of shell commands, run in order
   - name: build
@@ -172,10 +172,13 @@ container to a commit. A tree with uncommitted changes is tagged
 `<rev>-dirty`, since j-cicd builds what's on disk rather than what's
 committed. Declaring `tags:` explicitly overrides all of this.
 
-**Release remote.** With `remote:` (needs `branch:`) a run first does
+**Release remote.** With `branch:`, a run first does
 `git fetch <remote> <branch>` and builds `<remote>/<branch>`, so a PR merged
 on the remote ships without anyone pulling; the local branch and checkout
-are never touched. A failed fetch (2 minute limit, no credential prompts)
+are never touched. The remote is `remote:` if set, else the one the local
+branch tracks (`branch.<name>.remote`), so the default release is what was
+merged, not what a laptop happens to hold. `remote: none`, or a branch that
+tracks nothing, builds the local branch instead. A failed fetch (2 minute limit, no credential prompts)
 fails the run rather than building something stale. Local commits missing
 from the remote are a warning, being behind isn't. `--plan` fetches too, so
 the plan names the commit a run would build. `run --commit <rev>` pins a
@@ -184,8 +187,8 @@ so a run can't build something other than what was reviewed; a commit
 outside the history is refused.
 
 **Release branch.** With `branch:` set, a run never builds the project
-directory as it is on disk. It resolves the local branch to its latest
-commit, checks that commit out as a detached `git worktree` at
+directory as it is on disk. It resolves the branch (the remote's copy,
+see **Release remote**, or the local one) to its latest commit, checks that commit out as a detached `git worktree` at
 `<state root>/snapshots/<project>`, runs everything (steps, builds, push,
 deploy) there with the config *committed on that branch*, and removes the
 worktree afterwards. So the checked-out branch and uncommitted changes in
@@ -194,8 +197,9 @@ revision is always the branch's clean commit, so deploys work without
 `--deploy-dirty`. Build-only runs (`--no-push`, `b` in the dashboard)
 build the branch too. A snapshot holds only what's committed — no
 `node_modules`, `.env` or build output — so the steps must install what
-they need. It's the local branch, so committing is enough; pushing to a
-remote isn't required. A missing branch, a project dir outside git, or a
+they need. When the branch tracks a remote, what ships is what was pushed
+or merged there; with `remote: none` or no upstream, committing locally is
+enough. A missing branch, a project dir outside git, or a
 branch with no committed `.cicd.yaml` fails the run with a message saying
 which. Without `branch:`, the directory is built as before.
 
@@ -393,13 +397,14 @@ output depends on who is reading:
   no per-commit tag) lists a PROBLEM and exits 1.
   `--plan --json` is one object: `project`, `branch`, `revision`, `steps`,
   `images`, `deploy` (host, refs, `verify` URLs), `skipped`, `warnings`,
-  `problems`, `remote` (when `remote:` is set) and `upstream`/`ahead`/
+  `problems`, `remote` (when built from a remote) and `upstream`/`ahead`/
   `behind` (with `remote:`, `ahead` counts unpushed local commits left out
   of the build and `behind` is omitted).
-- **Local vs. origin**: without `remote:`, j-cicd builds the *local* branch (the
-  release `branch:`, or the checked-out one), and says so. If it's ahead of,
+- **Local vs. origin**: when it builds a *local* branch (no `branch:`, so the
+  checked-out one, or a release branch with `remote: none` or no upstream),
+  it says so. If it's ahead of,
   behind, or diverged from its upstream (as of the last fetch; j-cicd never
-  touches the network for this, except the fetch `remote:` asks for) it warns, in the run, the plan and the
+  touches the network for this, except a release remote's fetch) it warns, in the run, the plan and the
   concise output. The plan always states
   the relationship: in sync, ahead/behind, or no upstream to compare with.
 

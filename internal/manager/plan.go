@@ -36,8 +36,8 @@ type Plan struct {
 	Upstream string `json:"upstream,omitempty"`
 	Ahead    int    `json:"ahead,omitempty"`
 	Behind   int    `json:"behind,omitempty"`
-	// Remote is the git remote the branch was fetched from ("" for the
-	// local branch). Revision is the commit `run --commit` pins to.
+	// Remote is the git remote the branch was fetched from: remote:, or
+	// the one the local branch tracks ("" for the local branch). Revision is the commit `run --commit` pins to.
 	Remote   string   `json:"remote,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 	pipeline.Plan
